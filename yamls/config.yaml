@@ -1,0 +1,21 @@
+artifacts_root: artifacts
+
+data_ingestion:
+  root_dir: artifacts/data_ingestion
+  gcs_bucket: gs://moneylion-202511010/raw
+  raw_files:
+    - clarity_underwriting_variables.csv
+    - loan.csv
+    - payment.csv
+  local_download_dir: artifacts/data_ingestion/raw
+
+data_transformation:
+  root_dir: artifacts/data_transformation
+  loan_raw: artifacts/data_ingestion/raw/loan.csv
+  clarity_raw: artifacts/data_ingestion/raw/clarity_underwriting_variables.csv
+  joined_local: artifacts/data_transformation/joined_df.csv
+
+data_loading:
+  root_dir: artifacts/data_loading
+  local_file: artifacts/data_transformation/joined_df.csv
+  gcs_target: gs://moneylion-202511010/joined_df.csv
