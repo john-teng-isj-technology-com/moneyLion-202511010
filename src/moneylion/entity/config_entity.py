@@ -1,9 +1,14 @@
+from dataclasses import dataclass
+from pathlib import Path
+
 @dataclass
 class DataIngestionConfig:
     root_dir: Path
-    gcs_bucket: str
+    gcs_bucket_name: str
+    gcs_source_folder: str
     raw_files: list[str]
     local_download_dir: Path
+    gcp_credentials_path: Path
 
 @dataclass
 class DataTransformationConfig:

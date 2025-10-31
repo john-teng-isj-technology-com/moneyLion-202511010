@@ -1,32 +1,30 @@
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 from src.moneylion import logger
-from src.moneylion.components.data_ingestion import DataIngestion
+from src.moneylion.components.data_transformation import DataTransformation
 from src.moneylion.config.configuration import ConfigurationManager
 
 
-class DataIngestionPipeline:
+class DataTransformationPipeline:
 
     def __init__(self) -> None:
         self.config_manager = ConfigurationManager()
-        self.STAGE_NAME = "Data Ingestion"
+        self.STAGE_NAME = "Data Transformation"
 
-    def initiate_data_ingestion(self) -> bool:
+    def initiate_data_transformation(self) -> bool:
 
         # Get the configuration for the data ingestion stage
-        ingestion_config = self.config_manager.get_data_ingestion_config()
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(ingestion_config.gcp_credentials_path)
+        config = self.config_manager.get_data_transformation_config()
 
         # Instantiate and run the component
-        ingestion_component = DataIngestion(config=ingestion_config)
-        ingestion_component.download_files()
+        transformation_component = DataTransformation(config=config)
+        transformation_component.transform_data()
 
         return True
 
 if __name__ == '__main__':
     try :
-        obj = DataIngestionPipeline()
+        obj = DataTransformationPipeline()
         logger.info(f">>>> Stage '{obj.STAGE_NAME}' started <<<<")
         obj.initiate_data_ingestion()
         logger.info(f">>>> Stage '{obj.STAGE_NAME}' completed successfully <<<<\n")

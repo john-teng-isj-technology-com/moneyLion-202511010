@@ -2,12 +2,14 @@ artifacts_root: artifacts
 
 data_ingestion:
   root_dir: artifacts/data_ingestion
-  gcs_bucket: gs://moneylion-202511010/raw
+  gcs_bucket_name: moneylion-202511010
+  gcs_source_folder: raw 
   raw_files:
     - clarity_underwriting_variables.csv
     - loan.csv
     - payment.csv
   local_download_dir: artifacts/data_ingestion/raw
+  gcp_credentials_path: .credentials/gcp/daring-night-475804-a8-ab772b8e37f7.json
 
 data_transformation:
   root_dir: artifacts/data_transformation
