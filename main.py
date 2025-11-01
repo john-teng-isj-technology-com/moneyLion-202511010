@@ -23,8 +23,8 @@ class MainSequence:
             # StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
             # StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
             # StageSpec(DataPreprocessingPipeline, 'initiate_data_preprocessing'),
-            StageSpec(EmbeddingPipeline, 'initiate_embedding'),
-            # StageSpec(ModelTrainingPipeline, 'initiate_model_training'),
+            # StageSpec(EmbeddingPipeline, 'initiate_embedding'),
+            StageSpec(ModelTrainingPipeline, 'initiate_model_training'),
         ]
 
     def _run_stage(self, spec: StageSpec) -> Optional[Any]:

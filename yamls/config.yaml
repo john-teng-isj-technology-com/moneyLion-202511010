@@ -41,25 +41,9 @@ data_embedding:
   vocabs: vocabs.json
   embed_matrices: embed_matrices
   embed_schema: embed_schema.json
-  epochs: 3
-  batch_size_train: 4096
-  batch_size_infer: 512
-  lr: 1e-3
-  random_state: 517
-  embedding_dim_rule: sqrt
 
 model_training:
   root_dir: artifacts/model_training
   embed_dir: artifacts/data_embedding
-  model_type: xgboost
-  param_grid:
-    max_depth:  [3, 5]
-    eta:        [0.3, 0.1]
-    n_estimators: [200]
-    subsample:  [0.8]
-    colsample_bytree: [0.8]
-  early_stopping_rounds: 20
-  metric: auc
-  decision_threshold: auto         
   mlflow_experiment: loan-default-xgb-v1
 

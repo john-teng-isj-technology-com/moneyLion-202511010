@@ -77,15 +77,16 @@ class ConfigurationManager:
     
     def get_model_training_config(self) -> ModelTrainingConfig:
         cfg = self.config.model_training
+        params = self.params.model_training
         create_directories([cfg.root_dir])
         return ModelTrainingConfig(
             root_dir               = Path(cfg.root_dir),
             embed_dir              = Path(cfg.embed_dir),
-            model_type             = cfg.model_type,
-            param_grid             = cfg.param_grid,
-            early_stopping_rounds  = int(cfg.early_stopping_rounds),
-            metric                 = cfg.metric,
-            decision_threshold     = str(cfg.decision_threshold),
+            model_type             = params.model_type,
+            param_grid             = params.param_grid,
+            early_stopping_rounds  = int(params.early_stopping_rounds),
+            metric                 = params.metric,
+            decision_threshold     = str(params.decision_threshold),
             mlflow_experiment      = str(cfg.mlflow_experiment),
         )
 

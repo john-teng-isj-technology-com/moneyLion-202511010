@@ -5,3 +5,15 @@ data_embedding:
   lr: 1e-3
   random_state: 517
   embedding_dim_rule: sqrt
+
+model_training:
+  model_type: xgboost      
+  param_grid:
+    max_depth:  [3, 5]
+    eta:        [0.3, 0.1]
+    n_estimators: [200]
+    subsample:  [0.8]
+    colsample_bytree: [0.8]
+  early_stopping_rounds: 20
+  metric: auc
+  decision_threshold: auto    
