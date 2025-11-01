@@ -9,7 +9,9 @@
       {"type":"directory","name":"moneylion","contents":[
         {"type":"directory","name":"components","contents":[
           {"type":"file","name":"data_ingestion.py"},
-          {"type":"file","name":"data_transformation.py"}
+          {"type":"file","name":"data_transformation.py"},
+          {"type":"file","name":"data_preprocessing.py"},
+          {"type":"file","name":"embedding_export.py"}
         ]},
         {"type":"directory","name":"config","contents":[
           {"type":"file","name":"configuration.py"}
@@ -22,7 +24,9 @@
         ]},
         {"type":"directory","name":"pipeline","contents":[
           {"type":"file","name":"data_ingestion_pipeline.py"},
-          {"type":"file","name":"data_transformation_pipeline.py"}
+          {"type":"file","name":"data_transformation_pipeline.py"},
+          {"type":"file","name":"data_preprocessing_pipeline.py"},
+          {"type":"file","name":"embedding_pipeline.py"}
         ]},
         {"type":"directory","name":"utils","contents":[
           {"type":"file","name":"common.py"}

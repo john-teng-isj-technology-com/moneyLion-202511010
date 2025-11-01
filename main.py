@@ -7,7 +7,7 @@ from src.moneylion.pipeline.data_ingestion_pipeline import DataIngestionPipeline
 from src.moneylion.pipeline.data_transformation_pipeline import DataTransformationPipeline
 from src.moneylion.pipeline.data_preprocessing_pipeline import DataPreprocessingPipeline
 from src.moneylion.pipeline.embedding_pipeline import EmbeddingPipeline
-
+from src.moneylion.pipeline.model_training_pipeline import ModelTrainingPipeline
 
 @dataclass(frozen=True)
 class StageSpec:
@@ -22,7 +22,9 @@ class MainSequence:
         self.stages: list[StageSpec] = [
             # StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
             # StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
-            StageSpec(EmbeddingPipeline, 'initiate_embedding'),
+            # StageSpec(DataPreprocessingPipeline, 'initiate_data_preprocessing'),
+            # StageSpec(EmbeddingPipeline, 'initiate_embedding'),
+            StageSpec(ModelTrainingPipeline, 'initiate_model_training'),
         ]
 
     def _run_stage(self, spec: StageSpec) -> Optional[Any]:

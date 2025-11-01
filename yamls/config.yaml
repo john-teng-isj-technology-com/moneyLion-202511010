@@ -32,10 +32,21 @@ data_preprocessing:
 data_embedding:
   root_dir: artifacts/data_embedding
   preproc_dir: artifacts/data_preprocessing
-  # Hyper-parameters (tweak later)
   epochs: 3
   batch_size: 512
   lr: 1e-3
   random_state: 42
-  # embedding_dim_rule = "sqrt" or fixed integer
   embedding_dim_rule: sqrt
+
+model_training:
+  root_dir: artifacts/model_training           
+  embed_dir: artifacts/data_embedding          
+  model_type: xgboost                          
+  param_grid:                                  
+    max_depth:  [3, 5]
+    eta:        [0.3, 0.1]
+    n_estimators: [200]
+    subsample:  [0.8]
+    colsample_bytree: [0.8]
+  early_stopping_rounds: 20
+  metric: auc

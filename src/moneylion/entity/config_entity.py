@@ -40,3 +40,13 @@ class DataEmbeddingConfig:
     lr: float
     random_state: int
     embedding_dim_rule: str  
+
+@dataclass
+class ModelTrainingConfig:
+    root_dir: Path
+    embed_dir: Path
+    model_type: str
+    param_grid: dict
+    early_stopping_rounds: int
+    metric: str
+

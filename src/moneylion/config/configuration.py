@@ -1,7 +1,7 @@
 from src.moneylion.constants import *
 from src.moneylion.utils.common import read_yaml, create_directories
 from src.moneylion.entity.config_entity import (
-    DataIngestionConfig, DataTransformationConfig, DataPreprocessingConfig, DataEmbeddingConfig
+    DataIngestionConfig, DataTransformationConfig, DataPreprocessingConfig, DataEmbeddingConfig, ModelTrainingConfig
 )
 from pathlib import Path
 
@@ -63,3 +63,16 @@ class ConfigurationManager:
             random_state      = int(cfg.random_state),
             embedding_dim_rule= str(cfg.embedding_dim_rule),
         )
+    
+    def get_model_training_config(self) -> ModelTrainingConfig:
+        cfg = self.config.model_training
+        create_directories([cfg.root_dir])
+        return ModelTrainingConfig(
+            root_dir               = Path(cfg.root_dir),
+            embed_dir              = Path(cfg.embed_dir),
+            model_type             = cfg.model_type,
+            param_grid             = cfg.param_grid,
+            early_stopping_rounds  = int(cfg.early_stopping_rounds),
+            metric                 = cfg.metric,
+        )
+

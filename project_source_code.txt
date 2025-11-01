@@ -15,6 +15,8 @@ from src.moneylion import logger
 # Import your existing pipeline classes
 from src.moneylion.pipeline.data_ingestion_pipeline import DataIngestionPipeline
 from src.moneylion.pipeline.data_transformation_pipeline import DataTransformationPipeline
+from src.moneylion.pipeline.data_preprocessing_pipeline import DataPreprocessingPipeline
+from src.moneylion.pipeline.embedding_pipeline import EmbeddingPipeline
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,8 @@ class MainSequence:
         # Define the sequence once; easy to reorder or extend
         self.stages: list[StageSpec] = [
             # StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
-            StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
+            # StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
+            StageSpec(EmbeddingPipeline, 'initiate_embedding'),
         ]
 
     def _run_stage(self, spec: StageSpec) -> Optional[Any]:
@@ -140,6 +143,150 @@ class DataIngestion:
             logger.info(f"Successfully downloaded: '{filename}' from GCS to {local_path}")
 
 ===== END FILE: src/moneylion/components/data_ingestion.py =====
+
+===== BEGIN FILE: src/moneylion/components/data_preprocessing.py =====
+# src/moneylion/components/data_preprocessing.py
+
+from __future__ import annotations
+import json
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import DataPreprocessingConfig
+from src.moneylion.utils.common import create_directories
+
+
+_SPECIAL_COLS: List[str] = [
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncodedescription",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncodedescription",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.phonetype",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssndobreasoncode",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncode",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode",
+]
+
+_ID_COLS = ["loanId", "underwritingid", "clarityFraudId"]
+_LABEL_COL = "isBadDebt"
+
+
+class DataPreprocessor:
+    def __init__(self, config: DataPreprocessingConfig) -> None:
+        self.cfg = config
+        create_directories([self.cfg.root_dir])
+
+    # ------------------------------------------------------------------ #
+    # helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _build_vocab(series: pd.Series) -> Dict[str, int]:
+        uniq = sorted(series.unique().tolist())
+        return {token: idx for idx, token in enumerate(uniq)}
+
+    def _split_and_save(
+        self,
+        X_num: np.ndarray,
+        X_cat: np.ndarray,
+        y: np.ndarray,
+    ) -> None:
+        """train / val / test stratified split and npy dump"""
+        train_idx, temp_idx = train_test_split(
+            np.arange(len(y)),
+            test_size=self.cfg.test_size + self.cfg.val_size,
+            stratify=y,
+            random_state=self.cfg.random_state,
+        )
+        rel_test = self.cfg.test_size / (self.cfg.test_size + self.cfg.val_size)
+        val_idx, test_idx = train_test_split(
+            temp_idx,
+            test_size=rel_test,
+            stratify=y[temp_idx],
+            random_state=self.cfg.random_state,
+        )
+
+        splits = {
+            "train": train_idx,
+            "val": val_idx,
+            "test": test_idx,
+        }
+
+        for split_name, idx in splits.items():
+            np.save(self.cfg.root_dir / f"{split_name}_num.npy", X_num[idx].astype("float32"))
+            np.save(self.cfg.root_dir / f"{split_name}_cat.npy", X_cat[idx].astype("int64"))
+            np.save(self.cfg.root_dir / f"{split_name}_y.npy",   y[idx].astype("int64"))
+            logger.info("Saved %s split – %d rows", split_name, len(idx))
+
+    # ------------------------------------------------------------------ #
+    # public entry
+    # ------------------------------------------------------------------ #
+    def run(self) -> None:
+        logger.info("Loading joined_df from %s", self.cfg.joined_csv)
+        df = pd.read_csv(self.cfg.joined_csv, low_memory=False)
+
+        # ------------------------------------------------------------------
+        # 1. Prepare categorical special columns
+        # ------------------------------------------------------------------
+        cat_idx_arrays: List[np.ndarray] = []
+        vocabs_json: Dict[str, Dict[str, int]] = {}
+
+        for col in _SPECIAL_COLS:
+            if col not in df.columns:
+                logger.warning("Special column %s not found – filling 'NA'", col)
+                df[col] = "NA"
+            df[col] = df[col].fillna("NA").astype(str)
+
+            vocab = self._build_vocab(df[col])
+            vocabs_json[col] = vocab
+            cat_idx_arrays.append(df[col].map(vocab).to_numpy(np.int64))
+
+        X_cat = np.stack(cat_idx_arrays, axis=1)  # shape [N, C]
+        logger.info("Built categorical matrix shape %s", X_cat.shape)
+
+        # ------------------------------------------------------------------
+        # 2. Numeric matrix 
+        # ------------------------------------------------------------------
+        numeric_cols = [
+            c
+            for c in df.columns
+            if c not in (_SPECIAL_COLS + _ID_COLS + [_LABEL_COL])
+        ]
+        X_num = df[numeric_cols].to_numpy(np.float32)
+        logger.info("Numeric matrix shape %s", X_num.shape)
+
+        # ------------------------------------------------------------------
+        # 3. Labels
+        # ------------------------------------------------------------------
+        y = df[_LABEL_COL].to_numpy(np.int64)
+
+        # ------------------------------------------------------------------
+        # 4. Split and save
+        # ------------------------------------------------------------------
+        self._split_and_save(X_num, X_cat, y)
+
+        # ------------------------------------------------------------------
+        # 5. Persist metadata
+        # ------------------------------------------------------------------
+        with open(self.cfg.root_dir / "vocabs.json", "w") as f:
+            json.dump(vocabs_json, f, indent=2)
+        with open(self.cfg.root_dir / "columns.json", "w") as f:
+            json.dump(
+                {
+                    "categorical": _SPECIAL_COLS,
+                    "numeric": numeric_cols,
+                    "label": _LABEL_COL,
+                },
+                f,
+                indent=2,
+            )
+
+        logger.info("Data-preprocessing completed. Artifacts written to %s", self.cfg.root_dir)
+
+===== END FILE: src/moneylion/components/data_preprocessing.py =====
 
 ===== BEGIN FILE: src/moneylion/components/data_transformation.py =====
 # src/moneylion/components/data_transformation.py
@@ -254,7 +401,7 @@ class DataTransformation:
         for col in special_cols:
             if col in clarity_tf.columns:
                 clarity_tf[col] = clarity_df[col].apply(
-                    lambda x: 1 if pd.notnull(x) and x != '' else 0
+                    lambda x: str(x) if pd.notnull(x) and x != '' else '0'
                 )
 
         # bool → int
@@ -283,10 +430,193 @@ class DataTransformation:
 
 ===== END FILE: src/moneylion/components/data_transformation.py =====
 
+===== BEGIN FILE: src/moneylion/components/embedding_export.py =====
+from __future__ import annotations
+import json
+import math
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.utils import shuffle
+
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import DataEmbeddingConfig
+from src.moneylion.utils.common import create_directories
+
+
+class _EmbedNet(nn.Module):
+    def __init__(
+        self,
+        cardinalities: List[int],
+        numeric_dim: int,
+        dim_rule: str = "sqrt",
+    ) -> None:
+        super().__init__()
+
+        self.emb_layers = nn.ModuleList()
+        emb_dim_total   = 0
+        for card in cardinalities:
+            if dim_rule.isdigit():
+                emb_dim = int(dim_rule)
+            else:                          # rule == "sqrt"
+                emb_dim = int(math.sqrt(card))
+            emb_dim_total += emb_dim
+            self.emb_layers.append(nn.Embedding(card, emb_dim))
+
+        self.numeric_bn = nn.BatchNorm1d(numeric_dim) if numeric_dim else nn.Identity()
+
+        self.head = nn.Sequential(
+            nn.Linear(emb_dim_total + numeric_dim, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 1)
+        )
+
+    def forward(self, cat_idx: torch.Tensor, num: torch.Tensor) -> torch.Tensor:
+        emb_vecs = [emb(cat_idx[:, i]) for i, emb in enumerate(self.emb_layers)]
+        concat   = torch.cat(emb_vecs + [num], dim=1)
+        return self.head(concat), torch.cat(emb_vecs, dim=1)  # (logit, embed_vec)
+
+
+class EmbeddingExporter:
+    def __init__(self, cfg: DataEmbeddingConfig) -> None:
+        self.cfg = cfg
+        create_directories([self.cfg.root_dir])
+
+        pp_dir = self.cfg.preproc_dir
+        self.X_train_cat = np.load(pp_dir / "train_cat.npy")
+        self.X_train_num = np.load(pp_dir / "train_num.npy")
+        self.y_train     = np.load(pp_dir / "train_y.npy")
+
+        self.X_val_cat   = np.load(pp_dir / "val_cat.npy")
+        self.X_val_num   = np.load(pp_dir / "val_num.npy")
+        self.y_val       = np.load(pp_dir / "val_y.npy")
+
+        # vocabulary sizes
+        with open(pp_dir / "vocabs.json") as f:
+            self.vocabs: Dict[str, Dict[str, int]] = json.load(f)
+        self.cardinalities = [len(stoi) for stoi in self.vocabs.values()]
+        self.numeric_dim   = self.X_train_num.shape[1]
+
+        # ---------- model ----------
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model  = _EmbedNet(
+            self.cardinalities,
+            self.numeric_dim,
+            self.cfg.embedding_dim_rule
+        ).to(self.device)
+
+    # -------------------------------------------------------------- #
+    def _dl(self, X_cat, X_num, y, shuffle_flag=True) -> DataLoader:
+        Xc = torch.tensor(X_cat, dtype=torch.long)
+        Xn = torch.tensor(X_num, dtype=torch.float32)
+        yt = torch.tensor(y,     dtype=torch.float32).unsqueeze(1)
+        ds = TensorDataset(Xc, Xn, yt)
+        return DataLoader(
+            ds,
+            batch_size=self.cfg.batch_size,
+            shuffle=shuffle_flag,
+            num_workers=0,
+            drop_last=False,
+        )
+
+    def train(self) -> None:
+        torch.manual_seed(self.cfg.random_state)
+        opt = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
+        bce = nn.BCEWithLogitsLoss()
+
+        train_loader = self._dl(self.X_train_cat, self.X_train_num, self.y_train)
+        val_loader   = self._dl(self.X_val_cat,   self.X_val_num,   self.y_val, False)
+
+        for epoch in range(self.cfg.epochs):
+            self.model.train()
+            epoch_loss = 0.0
+            for Xc, Xn, y in train_loader:
+                Xc, Xn, y = Xc.to(self.device), Xn.to(self.device), y.to(self.device)
+                opt.zero_grad()
+                logit, _ = self.model(Xc, Xn)
+                loss = bce(logit, y)
+                loss.backward()
+                opt.step()
+                epoch_loss += loss.item() * len(y)
+
+            # simple val AUC / loss logging (optional)
+            self.model.eval()
+            with torch.no_grad():
+                val_loss = 0.0
+                for Xc, Xn, y in val_loader:
+                    Xc, Xn, y = Xc.to(self.device), Xn.to(self.device), y.to(self.device)
+                    logit, _  = self.model(Xc, Xn)
+                    val_loss += bce(logit, y).item() * len(y)
+            logger.info(
+                f"Epoch {epoch+1}/{self.cfg.epochs} "
+                f"train_loss={epoch_loss/len(self.y_train):.4f} "
+                f"val_loss={val_loss/len(self.y_val):.4f}"
+            )
+
+    def _export_row_embeddings(self, X_cat: np.ndarray) -> np.ndarray:
+        self.model.eval()
+        loader = DataLoader(
+            torch.tensor(X_cat, dtype=torch.long),
+            batch_size=4096,
+            shuffle=False
+        )
+        all_vecs = []
+        with torch.no_grad():
+            for Xc in loader:
+                Xc = Xc.to(self.device)
+                _, emb = self.model(Xc, torch.zeros((len(Xc), self.numeric_dim), device=self.device))
+                all_vecs.append(emb.cpu().numpy())
+        return np.vstack(all_vecs)
+
+    def export(self) -> None:
+        # Save raw embedding matrices per column (optional, nice for inspection)
+        embed_dir = self.cfg.root_dir / "embed_matrices"
+        create_directories([embed_dir])
+        for name, emb_layer in zip(self.vocabs.keys(), self.model.emb_layers):
+            np.save(embed_dir / f"{name}.npy", emb_layer.weight.detach().cpu().numpy())
+
+        # Build dense matrices = [emb_vec | numeric]
+        for split in ["train", "val", "test"]:
+            X_cat = np.load(self.cfg.preproc_dir / f"{split}_cat.npy")
+            X_num = np.load(self.cfg.preproc_dir / f"{split}_num.npy")
+            y     = np.load(self.cfg.preproc_dir / f"{split}_y.npy")
+
+            emb_vec = self._export_row_embeddings(X_cat)
+            X_dense = np.hstack([emb_vec, X_num]).astype("float32")
+
+            np.save(self.cfg.root_dir / f"X_{split}.npy", X_dense)
+            np.save(self.cfg.root_dir / f"y_{split}.npy", y.astype("int64"))
+            logger.info("Exported %s dense matrix shape %s", split, X_dense.shape)
+
+        # schema
+        schema = {
+            "embedded_dim_total": int(emb_vec.shape[1]),
+            "numeric_dim": int(self.numeric_dim),
+            "feature_order": [f"emb_{i}" for i in range(emb_vec.shape[1])]
+                            + [f"num_{i}" for i in range(self.numeric_dim)]
+        }
+        with open(self.cfg.root_dir / "embed_schema.json", "w") as f:
+            json.dump(schema, f, indent=2)
+
+        logger.info("Embedding export complete. Artifacts saved under %s", self.cfg.root_dir)
+
+    def run(self):
+        self.train()
+        self.export()
+
+===== END FILE: src/moneylion/components/embedding_export.py =====
+
 ===== BEGIN FILE: src/moneylion/config/configuration.py =====
 from src.moneylion.constants import *
 from src.moneylion.utils.common import read_yaml, create_directories
-from src.moneylion.entity.config_entity import (DataIngestionConfig, DataTransformationConfig, DataLoadingConfig)
+from src.moneylion.entity.config_entity import (
+    DataIngestionConfig, DataTransformationConfig, DataPreprocessingConfig, DataEmbeddingConfig
+)
 from pathlib import Path
 
 class ConfigurationManager:
@@ -324,6 +654,30 @@ class ConfigurationManager:
             joined_local    = config.joined_local
         )
 
+    def get_data_preprocessing_config(self) -> DataPreprocessingConfig:
+        cfg = self.config.data_preprocessing
+        create_directories([cfg.root_dir])
+        return DataPreprocessingConfig(
+            root_dir=Path(cfg.root_dir),
+            joined_csv=Path(cfg.joined_csv),
+            test_size=float(cfg.test_size),
+            val_size=float(cfg.val_size),
+            random_state=int(cfg.random_state),
+        )
+
+    def get_data_embedding_config(self) -> DataEmbeddingConfig:
+        cfg = self.config.data_embedding
+        create_directories([cfg.root_dir])
+        return DataEmbeddingConfig(
+            root_dir          = Path(cfg.root_dir),
+            preproc_dir       = Path(cfg.preproc_dir),
+            epochs            = int(cfg.epochs),
+            batch_size        = int(cfg.batch_size),
+            lr                = float(cfg.lr),
+            random_state      = int(cfg.random_state),
+            embedding_dim_rule= str(cfg.embedding_dim_rule),
+        )
+
 ===== END FILE: src/moneylion/config/configuration.py =====
 
 ===== BEGIN FILE: src/moneylion/constants/__init__.py =====
@@ -359,6 +713,24 @@ class DataLoadingConfig:
     root_dir: Path
     local_file: Path
     gcs_target: str
+
+@dataclass
+class DataPreprocessingConfig:
+    root_dir: Path
+    joined_csv: Path
+    test_size: float
+    val_size: float
+    random_state: int 
+
+@dataclass
+class DataEmbeddingConfig:
+    root_dir: Path
+    preproc_dir: Path
+    epochs: int
+    batch_size: int
+    lr: float
+    random_state: int
+    embedding_dim_rule: str  
 
 ===== END FILE: src/moneylion/entity/config_entity.py =====
 
@@ -399,6 +771,25 @@ if __name__ == '__main__':
         logger.exception(e)
 ===== END FILE: src/moneylion/pipeline/data_ingestion_pipeline.py =====
 
+===== BEGIN FILE: src/moneylion/pipeline/data_preprocessing_pipeline.py =====
+# pipeline/data_preprocessing_pipeline.py
+from src.moneylion import logger
+from src.moneylion.components.data_preprocessing import DataPreprocessor
+from src.moneylion.config.configuration import ConfigurationManager
+
+class DataPreprocessingPipeline:
+    STAGE_NAME = "Data Preprocessing"
+
+    def __init__(self) -> None:
+        cfg_mgr = ConfigurationManager()
+        self.cfg  = cfg_mgr.get_data_preprocessing_config()
+
+    def initiate_data_preprocessing(self) -> bool:
+        DataPreprocessor(self.cfg).run()
+        return True
+
+===== END FILE: src/moneylion/pipeline/data_preprocessing_pipeline.py =====
+
 ===== BEGIN FILE: src/moneylion/pipeline/data_transformation_pipeline.py =====
 import os
 from pathlib import Path
@@ -433,6 +824,23 @@ if __name__ == '__main__':
     except Exception as e:
         logger.exception(e)
 ===== END FILE: src/moneylion/pipeline/data_transformation_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/embedding_pipeline.py =====
+from src.moneylion import logger
+from src.moneylion.components.embedding_export import EmbeddingExporter
+from src.moneylion.config.configuration import ConfigurationManager
+
+class EmbeddingPipeline:
+    STAGE_NAME = "Data Embedding & Export"
+
+    def __init__(self):
+        self.cfg = ConfigurationManager().get_data_embedding_config()
+
+    def initiate_embedding(self) -> bool:
+        EmbeddingExporter(self.cfg).run()
+        return True
+
+===== END FILE: src/moneylion/pipeline/embedding_pipeline.py =====
 
 ===== BEGIN FILE: src/moneylion/utils/common.py =====
 import os
@@ -558,6 +966,24 @@ data_loading:
   root_dir: artifacts/data_loading
   local_file: artifacts/data_transformation/joined_df.csv
   gcs_target: gs://moneylion-202511010/joined_df.csv
+
+data_preprocessing:
+  root_dir: artifacts/data_preprocessing
+  joined_csv: artifacts/data_transformation/joined_df.csv
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 517
+
+data_embedding:
+  root_dir: artifacts/data_embedding
+  preproc_dir: artifacts/data_preprocessing
+  # Hyper-parameters (tweak later)
+  epochs: 3
+  batch_size: 512
+  lr: 1e-3
+  random_state: 42
+  # embedding_dim_rule = "sqrt" or fixed integer
+  embedding_dim_rule: sqrt
 
 ===== END FILE: yamls/config.yaml =====
 
