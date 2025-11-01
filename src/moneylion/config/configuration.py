@@ -53,15 +53,26 @@ class ConfigurationManager:
 
     def get_data_embedding_config(self) -> DataEmbeddingConfig:
         cfg = self.config.data_embedding
+        params = self.params.data_embedding
         create_directories([cfg.root_dir])
         return DataEmbeddingConfig(
-            root_dir          = Path(cfg.root_dir),
-            preproc_dir       = Path(cfg.preproc_dir),
-            epochs            = int(cfg.epochs),
-            batch_size        = int(cfg.batch_size),
-            lr                = float(cfg.lr),
-            random_state      = int(cfg.random_state),
-            embedding_dim_rule= str(cfg.embedding_dim_rule),
+            root_dir            = Path(cfg.root_dir),
+            preproc_dir         = Path(cfg.preproc_dir),
+            train_cat           = str(cfg.train_cat),
+            train_num           = str(cfg.train_num),
+            train_y             = str(cfg.train_y),
+            val_cat             = str(cfg.val_cat),
+            val_num             = str(cfg.val_num),
+            val_y               = str(cfg.val_y),
+            vocabs              = str(cfg.vocabs),
+            embed_matrices      = str(cfg.embed_matrices),
+            embed_schema        = str(cfg.embed_schema),
+            epochs              = int(params.epochs),
+            batch_size_train    = int(params.batch_size_train),
+            batch_size_infer    = int(params.batch_size_infer),
+            lr                  = float(params.lr),
+            random_state        = int(params.random_state),
+            embedding_dim_rule  = str(params.embedding_dim_rule),
         )
     
     def get_model_training_config(self) -> ModelTrainingConfig:

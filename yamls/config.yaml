@@ -32,8 +32,18 @@ data_preprocessing:
 data_embedding:
   root_dir: artifacts/data_embedding
   preproc_dir: artifacts/data_preprocessing
+  train_cat: train_cat.npy
+  train_num: train_num.npy
+  train_y: train_y.npy
+  val_cat: val_cat.npy
+  val_num: val_num.npy
+  val_y: val_y.npy
+  vocabs: vocabs.json
+  embed_matrices: embed_matrices
+  embed_schema: embed_schema.json
   epochs: 3
-  batch_size: 512
+  batch_size_train: 4096
+  batch_size_infer: 512
   lr: 1e-3
   random_state: 517
   embedding_dim_rule: sqrt

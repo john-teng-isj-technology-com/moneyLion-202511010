@@ -35,8 +35,18 @@ class DataPreprocessingConfig:
 class DataEmbeddingConfig:
     root_dir: Path
     preproc_dir: Path
+    train_cat: str
+    train_num: str
+    train_y: str
+    val_cat: str
+    val_num: str
+    val_y: str
+    vocabs: str
+    embed_matrices: str
+    embed_schema: str
     epochs: int
-    batch_size: int
+    batch_size_train: int
+    batch_size_infer: int
     lr: float
     random_state: int
     embedding_dim_rule: str  

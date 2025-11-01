@@ -1,1 +1,7 @@
-'key': 'value'
+data_embedding:
+  epochs: 3
+  batch_size_train: 4096
+  batch_size_infer: 512
+  lr: 1e-3
+  random_state: 517
+  embedding_dim_rule: sqrt

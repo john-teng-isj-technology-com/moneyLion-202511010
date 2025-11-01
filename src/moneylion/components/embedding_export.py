@@ -29,7 +29,7 @@ class _EmbedNet(nn.Module):
         for card in cardinalities:
             if dim_rule.isdigit():
                 emb_dim = int(dim_rule)
-            else:                          # rule == "sqrt"
+            else:                          
                 emb_dim = int(math.sqrt(card))
             emb_dim_total += emb_dim
             self.emb_layers.append(nn.Embedding(card, emb_dim))
@@ -46,8 +46,8 @@ class _EmbedNet(nn.Module):
     def forward(self, cat_idx: torch.Tensor, num: torch.Tensor) -> torch.Tensor:
         emb_vecs = [emb(cat_idx[:, i]) for i, emb in enumerate(self.emb_layers)]
         concat   = torch.cat(emb_vecs + [num], dim=1)
-        return self.head(concat), torch.cat(emb_vecs, dim=1)  # (logit, embed_vec)
-
+        return self.head(concat), torch.cat(emb_vecs, dim=1) 
+    
 
 class EmbeddingExporter:
     def __init__(self, cfg: DataEmbeddingConfig) -> None:
@@ -55,29 +55,27 @@ class EmbeddingExporter:
         create_directories([self.cfg.root_dir])
 
         pp_dir = self.cfg.preproc_dir
-        self.X_train_cat = np.load(pp_dir / "train_cat.npy")
-        self.X_train_num = np.load(pp_dir / "train_num.npy")
-        self.y_train     = np.load(pp_dir / "train_y.npy")
+        self.X_train_cat = np.load(pp_dir / self.cfg.train_cat)
+        self.X_train_num = np.load(pp_dir / self.cfg.train_num)
+        self.y_train     = np.load(pp_dir / self.cfg.train_y)
 
-        self.X_val_cat   = np.load(pp_dir / "val_cat.npy")
-        self.X_val_num   = np.load(pp_dir / "val_num.npy")
-        self.y_val       = np.load(pp_dir / "val_y.npy")
+        self.X_val_cat   = np.load(pp_dir / self.cfg.val_cat)
+        self.X_val_num   = np.load(pp_dir / self.cfg.val_num)
+        self.y_val       = np.load(pp_dir / self.cfg.val_y)
 
         # vocabulary sizes
-        with open(pp_dir / "vocabs.json") as f:
+        with open(pp_dir / self.cfg.vocabs) as f:
             self.vocabs: Dict[str, Dict[str, int]] = json.load(f)
         self.cardinalities = [len(stoi) for stoi in self.vocabs.values()]
         self.numeric_dim   = self.X_train_num.shape[1]
 
-        # ---------- model ----------
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
         self.model  = _EmbedNet(
             self.cardinalities,
             self.numeric_dim,
             self.cfg.embedding_dim_rule
         ).to(self.device)
 
-    # -------------------------------------------------------------- #
     def _dl(self, X_cat, X_num, y, shuffle_flag=True) -> DataLoader:
         Xc = torch.tensor(X_cat, dtype=torch.long)
         Xn = torch.tensor(X_num, dtype=torch.float32)
@@ -85,7 +83,7 @@ class EmbeddingExporter:
         ds = TensorDataset(Xc, Xn, yt)
         return DataLoader(
             ds,
-            batch_size=self.cfg.batch_size,
+            batch_size=self.cfg.batch_size_train,
             shuffle=shuffle_flag,
             num_workers=0,
             drop_last=False,
@@ -111,7 +109,6 @@ class EmbeddingExporter:
                 opt.step()
                 epoch_loss += loss.item() * len(y)
 
-            # simple val AUC / loss logging (optional)
             self.model.eval()
             with torch.no_grad():
                 val_loss = 0.0
@@ -129,7 +126,7 @@ class EmbeddingExporter:
         self.model.eval()
         loader = DataLoader(
             torch.tensor(X_cat, dtype=torch.long),
-            batch_size=4096,
+            batch_size=self.cfg.batch_size_infer,
             shuffle=False
         )
         all_vecs = []
@@ -141,13 +138,11 @@ class EmbeddingExporter:
         return np.vstack(all_vecs)
 
     def export(self) -> None:
-        # Save raw embedding matrices per column (optional, nice for inspection)
-        embed_dir = self.cfg.root_dir / "embed_matrices"
+        embed_dir = self.cfg.root_dir / self.cfg.embed_matrices
         create_directories([embed_dir])
         for name, emb_layer in zip(self.vocabs.keys(), self.model.emb_layers):
             np.save(embed_dir / f"{name}.npy", emb_layer.weight.detach().cpu().numpy())
 
-        # Build dense matrices = [emb_vec | numeric]
         for split in ["train", "val", "test"]:
             X_cat = np.load(self.cfg.preproc_dir / f"{split}_cat.npy")
             X_num = np.load(self.cfg.preproc_dir / f"{split}_num.npy")
@@ -160,14 +155,13 @@ class EmbeddingExporter:
             np.save(self.cfg.root_dir / f"y_{split}.npy", y.astype("int64"))
             logger.info("Exported %s dense matrix shape %s", split, X_dense.shape)
 
-        # schema
         schema = {
             "embedded_dim_total": int(emb_vec.shape[1]),
             "numeric_dim": int(self.numeric_dim),
             "feature_order": [f"emb_{i}" for i in range(emb_vec.shape[1])]
                             + [f"num_{i}" for i in range(self.numeric_dim)]
         }
-        with open(self.cfg.root_dir / "embed_schema.json", "w") as f:
+        with open(self.cfg.root_dir / self.cfg.embed_schema, "w") as f:
             json.dump(schema, f, indent=2)
 
         logger.info("Embedding export complete. Artifacts saved under %s", self.cfg.root_dir)
