@@ -1,6 +1,8 @@
 from src.moneylion.constants import *
 from src.moneylion.utils.common import read_yaml, create_directories
-from src.moneylion.entity.config_entity import (DataIngestionConfig, DataTransformationConfig, DataLoadingConfig)
+from src.moneylion.entity.config_entity import (
+    DataIngestionConfig, DataTransformationConfig, DataPreprocessingConfig, DataEmbeddingConfig
+)
 from pathlib import Path
 
 class ConfigurationManager:
@@ -36,4 +38,28 @@ class ConfigurationManager:
             loan_raw        = config.loan_raw,
             clarity_raw     = config.clarity_raw,
             joined_local    = config.joined_local
+        )
+
+    def get_data_preprocessing_config(self) -> DataPreprocessingConfig:
+        cfg = self.config.data_preprocessing
+        create_directories([cfg.root_dir])
+        return DataPreprocessingConfig(
+            root_dir=Path(cfg.root_dir),
+            joined_csv=Path(cfg.joined_csv),
+            test_size=float(cfg.test_size),
+            val_size=float(cfg.val_size),
+            random_state=int(cfg.random_state),
+        )
+
+    def get_data_embedding_config(self) -> DataEmbeddingConfig:
+        cfg = self.config.data_embedding
+        create_directories([cfg.root_dir])
+        return DataEmbeddingConfig(
+            root_dir          = Path(cfg.root_dir),
+            preproc_dir       = Path(cfg.preproc_dir),
+            epochs            = int(cfg.epochs),
+            batch_size        = int(cfg.batch_size),
+            lr                = float(cfg.lr),
+            random_state      = int(cfg.random_state),
+            embedding_dim_rule= str(cfg.embedding_dim_rule),
         )

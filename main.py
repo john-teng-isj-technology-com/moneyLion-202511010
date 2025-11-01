@@ -5,6 +5,8 @@ from src.moneylion import logger
 # Import your existing pipeline classes
 from src.moneylion.pipeline.data_ingestion_pipeline import DataIngestionPipeline
 from src.moneylion.pipeline.data_transformation_pipeline import DataTransformationPipeline
+from src.moneylion.pipeline.data_preprocessing_pipeline import DataPreprocessingPipeline
+from src.moneylion.pipeline.embedding_pipeline import EmbeddingPipeline
 
 
 @dataclass(frozen=True)
@@ -19,7 +21,8 @@ class MainSequence:
         # Define the sequence once; easy to reorder or extend
         self.stages: list[StageSpec] = [
             # StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
-            StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
+            # StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
+            StageSpec(EmbeddingPipeline, 'initiate_embedding'),
         ]
 
     def _run_stage(self, spec: StageSpec) -> Optional[Any]:

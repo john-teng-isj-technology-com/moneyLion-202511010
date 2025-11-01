@@ -21,3 +21,21 @@ data_loading:
   root_dir: artifacts/data_loading
   local_file: artifacts/data_transformation/joined_df.csv
   gcs_target: gs://moneylion-202511010/joined_df.csv
+
+data_preprocessing:
+  root_dir: artifacts/data_preprocessing
+  joined_csv: artifacts/data_transformation/joined_df.csv
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 517
+
+data_embedding:
+  root_dir: artifacts/data_embedding
+  preproc_dir: artifacts/data_preprocessing
+  # Hyper-parameters (tweak later)
+  epochs: 3
+  batch_size: 512
+  lr: 1e-3
+  random_state: 42
+  # embedding_dim_rule = "sqrt" or fixed integer
+  embedding_dim_rule: sqrt

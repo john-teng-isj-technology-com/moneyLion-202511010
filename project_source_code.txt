@@ -1,0 +1,566 @@
+
+===== BEGIN FILE: Dockerfile =====
+
+===== END FILE: Dockerfile =====
+
+===== BEGIN FILE: app.py =====
+
+===== END FILE: app.py =====
+
+===== BEGIN FILE: main.py =====
+from dataclasses import dataclass
+from typing import Callable, Type, Any, Optional
+from src.moneylion import logger
+
+# Import your existing pipeline classes
+from src.moneylion.pipeline.data_ingestion_pipeline import DataIngestionPipeline
+from src.moneylion.pipeline.data_transformation_pipeline import DataTransformationPipeline
+
+
+@dataclass(frozen=True)
+class StageSpec:
+    pipeline_cls: Type[Any]
+    method_name: str
+    require_true: bool = False  # set True for validation-like stages
+
+
+class MainSequence:
+    def __init__(self):
+        # Define the sequence once; easy to reorder or extend
+        self.stages: list[StageSpec] = [
+            # StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
+            StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
+        ]
+
+    def _run_stage(self, spec: StageSpec) -> Optional[Any]:
+        obj = spec.pipeline_cls()
+        stage_name = getattr(obj, 'STAGE_NAME', obj.__class__.__name__)
+
+        logger.info(f'>>>> stage {stage_name} started <<<<')
+        result = getattr(obj, spec.method_name)()
+        if spec.require_true and not result:
+            # keep your original behavior for validation failure
+            raise Exception('VALIDATION FAILED')
+        logger.info(f'>>>> stage {stage_name} completed <<<<')
+        return result
+
+    def run(self) -> None:
+        try:
+            for spec in self.stages:
+                self._run_stage(spec)
+        except Exception as e:
+            logger.exception(e)
+            raise
+
+
+if __name__ == '__main__':
+    main_sequence = MainSequence()
+    main_sequence.run()
+
+===== END FILE: main.py =====
+
+===== BEGIN FILE: requirements.txt =====
+# =================================================================
+# Core Data Science
+# =================================================================
+pandas
+numpy
+scikit-learn
+torch
+
+
+# =================================================================
+# Utilities
+# =================================================================
+PyYAML
+python-box
+python-dotenv
+ensure
+tqdm
+
+
+# =================================================================
+# Google Cloud Platform (GCP) 
+# =================================================================
+google-cloud-storage
+
+# =================================================================
+# Experiment Tracking 
+# =================================================================
+mlflow
+xgboost
+
+# =================================================================
+# Development & Visualization
+# =================================================================
+# notebook
+# matplotlib
+# seaborn
+
+# =================================================================
+# API Deployment (Optional for Stage 3)
+# =================================================================
+# Flask
+# gunicorn
+
+
+===== END FILE: requirements.txt =====
+
+===== BEGIN FILE: setup.py =====
+
+===== END FILE: setup.py =====
+
+===== BEGIN FILE: src/moneylion/components/data_ingestion.py =====
+import os
+from pathlib import Path
+from google.cloud import storage
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import DataIngestionConfig
+from src.moneylion.utils.common import create_directories
+
+
+class DataIngestion:
+
+    def __init__(self, config: DataIngestionConfig) -> None:
+        self.config = config
+        # Ensure the destination directory exists before any downloads
+        create_directories([self.config.local_download_dir])
+        self.storage_client = storage.Client()
+
+    def download_files(self) -> None:
+        # Get a client handle to the GCS bucket
+        bucket = self.storage_client.bucket(self.config.gcs_bucket_name)
+        logger.info(f"Successfully connected to GCS bucket: '{self.config.gcs_bucket_name}'")
+
+        for filename in self.config.raw_files:
+            local_path = os.path.join(self.config.local_download_dir, filename)
+            blob_path = os.path.join(self.config.gcs_source_folder, filename)
+            blob = bucket.blob(blob_path)
+            blob.download_to_filename(local_path)
+            logger.info(f"Successfully downloaded: '{filename}' from GCS to {local_path}")
+
+===== END FILE: src/moneylion/components/data_ingestion.py =====
+
+===== BEGIN FILE: src/moneylion/components/data_transformation.py =====
+# src/moneylion/components/data_transformation.py
+
+import pandas as pd 
+import numpy as np
+import copy
+from pathlib import Path
+
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import DataTransformationConfig
+from src.moneylion.utils.common import create_directories
+
+
+class DataTransformation:
+    def __init__(self, config: DataTransformationConfig) -> None:
+        self.config = config
+        create_directories([self.config.root_dir])
+
+    @staticmethod
+    def _calculate_z_score(series: pd.Series) -> pd.Series:
+        mean = series.mean()
+        std  = series.std(ddof=0) or 1.0  # avoid division by zero
+        return (series - mean) / std
+
+    @staticmethod
+    def _contains_match(col: pd.Series) -> bool:
+        return col.astype(str).str.lower().str.contains("match").any()
+
+    def transform_data(self) -> None:
+
+        loan_df = pd.read_csv(self.config.loan_raw)
+        bad_status  = [
+            'Charged Off', 'Settled Bankruptcy', 'Charged Off Paid Off',
+            'External Collection', 'Internal Collection', 'Rejected'
+        ]
+        good_status = ['Paid Off Loan', 'Settlement Paid Off']
+
+        loan_df['isBadDebt'] = loan_df['loanStatus'].apply(
+            lambda x: True  if x in bad_status  else
+                      False if x in good_status else None
+        )
+
+        # keep only rows we can label
+        loan_df = loan_df[loan_df['loanStatus'].isin(bad_status + good_status)]
+
+        # remove dirty rows 
+        loan_df = loan_df[~((loan_df['isFunded'] == 1) & (loan_df['loanStatus'] == 'Rejected'))]
+        loan_df = loan_df[~((loan_df['isFunded'] == 0) & (loan_df['loanStatus'] != 'Rejected'))]
+
+        wanted_cols = [
+            'loanId', 'payFrequency', 'apr', 'originated', 'nPaidOff',
+            'isBadDebt', 'loanAmount',
+            'originallyScheduledPaymentAmount', 'state', 'leadType',
+            'fpStatus', 'clarityFraudId', 'hasCF'
+        ]
+        loan_df = loan_df[wanted_cols]
+
+        # one-hot encode categorical cols
+        dummies = pd.get_dummies(
+            loan_df[['payFrequency', 'state', 'leadType', 'fpStatus']],
+            prefix=['payFrequency', 'state', 'leadType', 'fpStatus'],
+            dtype=int
+        )
+        loan_df = pd.concat(
+            [loan_df.drop(columns=['payFrequency', 'state', 'leadType', 'fpStatus']),
+             dummies],
+            axis=1
+        )
+
+        # boolean → int
+        loan_df['originated'] = loan_df['originated'].astype(int)
+        loan_df['isBadDebt']  = loan_df['isBadDebt'].astype(int)
+
+        # z-score selected numeric columns
+        for col in ['apr', 'nPaidOff', 'loanAmount', 'originallyScheduledPaymentAmount']:
+            loan_df[col] = self._calculate_z_score(loan_df[col])
+
+        # 2 ─────────────────────────────── Clarity data
+        clarity_df = pd.read_csv(self.config.clarity_raw, low_memory=False)
+
+        num_cols     = clarity_df.select_dtypes(include=['number']).columns.tolist()
+        bool_cols    = clarity_df.select_dtypes(include=['bool']).columns.tolist()
+        match_cols   = [c for c in clarity_df.columns
+                        if self._contains_match(clarity_df[c])]
+
+        special_cols = [
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncodedescription',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncodedescription',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.phonetype',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.ssndobreasoncode',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncode',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode'
+        ]
+
+        keep_cols = list(
+            set(num_cols + bool_cols + match_cols + special_cols + ['underwritingid'])
+        )
+        clarity_df = clarity_df[keep_cols]
+
+        # deep copy for transformations
+        clarity_tf = copy.deepcopy(clarity_df)
+
+        # “match” cols → 0/1
+        for col in match_cols:
+            clarity_tf[col] = clarity_df[col].apply(
+                lambda x: 1 if "match" in str(x).lower() else 0
+            )
+
+        # special presence cols → 0/1
+        for col in special_cols:
+            if col in clarity_tf.columns:
+                clarity_tf[col] = clarity_df[col].apply(
+                    lambda x: 1 if pd.notnull(x) and x != '' else 0
+                )
+
+        # bool → int
+        for col in bool_cols:
+            clarity_tf[col] = clarity_df[col].astype(int)
+
+        # z-score numeric
+        for col in num_cols:
+            clarity_tf[col] = self._calculate_z_score(clarity_df[col])
+
+        # Join
+        loan_df['clarityFraudId']   = loan_df['clarityFraudId'].astype(str)
+        clarity_tf['underwritingid'] = clarity_tf['underwritingid'].astype(str)
+
+        joined_df = loan_df.merge(
+            clarity_tf,
+            how='left',
+            left_on='clarityFraudId',
+            right_on='underwritingid'
+        ).fillna(0)
+
+        # Save
+        out_path = Path(self.config.joined_local)
+        joined_df.to_csv(out_path, index=False)
+        logger.info(f"joined_df created with shape {joined_df.shape} → {out_path}")
+
+===== END FILE: src/moneylion/components/data_transformation.py =====
+
+===== BEGIN FILE: src/moneylion/config/configuration.py =====
+from src.moneylion.constants import *
+from src.moneylion.utils.common import read_yaml, create_directories
+from src.moneylion.entity.config_entity import (DataIngestionConfig, DataTransformationConfig, DataLoadingConfig)
+from pathlib import Path
+
+class ConfigurationManager:
+    def __init__(self, 
+                 config_filepath=CONFIG_FILE_PATH,
+                 params_filepath=PARAMS_FILE_PATH
+                 ):
+        self.config = read_yaml(config_filepath)
+        self.params = read_yaml(params_filepath)
+
+        create_directories([self.config.artifacts_root])
+
+    def get_data_ingestion_config(self) -> DataIngestionConfig:
+        config=self.config.data_ingestion
+        create_directories([config.root_dir])
+
+        data_ingestion_config = DataIngestionConfig(
+            root_dir=config.root_dir,
+            gcs_bucket_name=config.gcs_bucket_name,
+            gcs_source_folder = config.gcs_source_folder,
+            raw_files=config.raw_files,
+            local_download_dir=config.local_download_dir,
+            # absolute path
+            gcp_credentials_path = Path(config.gcp_credentials_path).resolve(), 
+        )
+        return data_ingestion_config
+    
+    def get_data_transformation_config(self) -> DataTransformationConfig:
+        config = self.config.data_transformation
+        create_directories([config.root_dir])
+        return DataTransformationConfig(
+            root_dir        = config.root_dir,
+            loan_raw        = config.loan_raw,
+            clarity_raw     = config.clarity_raw,
+            joined_local    = config.joined_local
+        )
+
+===== END FILE: src/moneylion/config/configuration.py =====
+
+===== BEGIN FILE: src/moneylion/constants/__init__.py =====
+from pathlib import Path
+
+CONFIG_FILE_PATH=Path('yamls/config.yaml')
+PARAMS_FILE_PATH=Path('yamls/params.yaml')
+
+===== END FILE: src/moneylion/constants/__init__.py =====
+
+===== BEGIN FILE: src/moneylion/entity/config_entity.py =====
+from dataclasses import dataclass
+from pathlib import Path
+
+@dataclass
+class DataIngestionConfig:
+    root_dir: Path
+    gcs_bucket_name: str
+    gcs_source_folder: str
+    raw_files: list[str]
+    local_download_dir: Path
+    gcp_credentials_path: Path
+
+@dataclass
+class DataTransformationConfig:
+    root_dir: Path
+    loan_raw: Path
+    clarity_raw: Path
+    joined_local: Path
+
+@dataclass
+class DataLoadingConfig:
+    root_dir: Path
+    local_file: Path
+    gcs_target: str
+
+===== END FILE: src/moneylion/entity/config_entity.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/data_ingestion_pipeline.py =====
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+from src.moneylion import logger
+from src.moneylion.components.data_ingestion import DataIngestion
+from src.moneylion.config.configuration import ConfigurationManager
+
+
+class DataIngestionPipeline:
+
+    def __init__(self) -> None:
+        self.config_manager = ConfigurationManager()
+        self.STAGE_NAME = "Data Ingestion"
+
+    def initiate_data_ingestion(self) -> bool:
+
+        # Get the configuration for the data ingestion stage
+        ingestion_config = self.config_manager.get_data_ingestion_config()
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(ingestion_config.gcp_credentials_path)
+
+        # Instantiate and run the component
+        ingestion_component = DataIngestion(config=ingestion_config)
+        ingestion_component.download_files()
+
+        return True
+
+if __name__ == '__main__':
+    try :
+        obj = DataIngestionPipeline()
+        logger.info(f">>>> Stage '{obj.STAGE_NAME}' started <<<<")
+        obj.initiate_data_ingestion()
+        logger.info(f">>>> Stage '{obj.STAGE_NAME}' completed successfully <<<<\n")
+    except Exception as e:
+        logger.exception(e)
+===== END FILE: src/moneylion/pipeline/data_ingestion_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/data_transformation_pipeline.py =====
+import os
+from pathlib import Path
+from src.moneylion import logger
+from src.moneylion.components.data_transformation import DataTransformation
+from src.moneylion.config.configuration import ConfigurationManager
+
+
+class DataTransformationPipeline:
+
+    def __init__(self) -> None:
+        self.config_manager = ConfigurationManager()
+        self.STAGE_NAME = "Data Transformation"
+
+    def initiate_data_transformation(self) -> bool:
+
+        # Get the configuration for the data ingestion stage
+        config = self.config_manager.get_data_transformation_config()
+
+        # Instantiate and run the component
+        transformation_component = DataTransformation(config=config)
+        transformation_component.transform_data()
+
+        return True
+
+if __name__ == '__main__':
+    try :
+        obj = DataTransformationPipeline()
+        logger.info(f">>>> Stage '{obj.STAGE_NAME}' started <<<<")
+        obj.initiate_data_ingestion()
+        logger.info(f">>>> Stage '{obj.STAGE_NAME}' completed successfully <<<<\n")
+    except Exception as e:
+        logger.exception(e)
+===== END FILE: src/moneylion/pipeline/data_transformation_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/utils/common.py =====
+import os
+import yaml
+from src.moneylion import logger
+import json
+import joblib
+from ensure import ensure_annotations
+from box import ConfigBox
+from pathlib import Path
+from typing import Any 
+from box.exceptions import BoxValueError
+
+@ensure_annotations
+def read_yaml( path_to_yaml: Path) -> ConfigBox:
+    """reads yaml file and returns
+    
+    Args:
+        path_to_yaml (str) : path like input 
+
+    Raises:
+        ValueError: if yaml file is empty
+        e: empth file
+
+    Returns:
+        ConfigBox: ConfigBox type
+    """
+    try:
+        with open( path_to_yaml) as yaml_file:
+            content = yaml.safe_load(yaml_file)
+            logger.info(f'yaml file: {path_to_yaml} loaded successfully')
+            return ConfigBox(content)
+    except BoxValueError:
+        raise ValueError('yaml file is empty')
+    except Exception as e:
+        raise e
+    
+
+@ensure_annotations
+def create_directories( path_to_directories: list, verbose=True):
+    """create list of directories
+
+    Args:
+        path_to_directories (list)
+        ignore_log (bool, optional)
+
+    """
+    for path in path_to_directories:
+        os.makedirs(path, exist_ok=True)
+        if verbose: 
+            logger.info(f'created directory at: {path}')   
+
+
+@ensure_annotations
+def save_json(path: Path, data: dict):
+    """save json data
+    Args:
+        path (Path)
+        data (dict)
+    """
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=4)
+
+    logger.info(f'json file saved at: {path}')
+
+
+@ensure_annotations
+def load_json(path: Path) -> ConfigBox:
+    """loads json files data
+    Args:
+        path (Path)
+    Returns:
+        data as class attributes instead of dict (ConfigBox)
+    """
+    with open(path) as f:
+        content=json.load(f)
+
+    logger.info(f'json file loaded successfully from: {path}')
+    return ConfigBox(content)
+
+
+@ensure_annotations
+def save_bin(data: Any, path: Path):
+    """save binary file
+    Args:
+        data (Any)
+        path (Path)
+    """
+    joblib.dump(value=data, filename=path)
+    logger.info(f'binary file saved at {path}')
+
+
+@ensure_annotations
+def load_bin(path: Path) -> Any:
+    """load binary data
+    """
+    data = joblib.load(path)
+    logger.info(f'binary file loaded from: {path}')
+    return data
+===== END FILE: src/moneylion/utils/common.py =====
+
+===== BEGIN FILE: yamls/config.yaml =====
+artifacts_root: artifacts
+
+data_ingestion:
+  root_dir: artifacts/data_ingestion
+  gcs_bucket_name: moneylion-202511010
+  gcs_source_folder: raw 
+  raw_files:
+    - clarity_underwriting_variables.csv
+    - loan.csv
+    - payment.csv
+  local_download_dir: artifacts/data_ingestion/raw
+  gcp_credentials_path: .credentials/gcp/daring-night-475804-a8-ab772b8e37f7.json
+
+data_transformation:
+  root_dir: artifacts/data_transformation
+  loan_raw: artifacts/data_ingestion/raw/loan.csv
+  clarity_raw: artifacts/data_ingestion/raw/clarity_underwriting_variables.csv
+  joined_local: artifacts/data_transformation/joined_df.csv
+
+data_loading:
+  root_dir: artifacts/data_loading
+  local_file: artifacts/data_transformation/joined_df.csv
+  gcs_target: gs://moneylion-202511010/joined_df.csv
+
+===== END FILE: yamls/config.yaml =====
+
+===== BEGIN FILE: yamls/params.yaml =====
+'key': 'value'
+===== END FILE: yamls/params.yaml =====

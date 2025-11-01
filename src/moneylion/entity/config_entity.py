@@ -22,3 +22,21 @@ class DataLoadingConfig:
     root_dir: Path
     local_file: Path
     gcs_target: str
+
+@dataclass
+class DataPreprocessingConfig:
+    root_dir: Path
+    joined_csv: Path
+    test_size: float
+    val_size: float
+    random_state: int 
+
+@dataclass
+class DataEmbeddingConfig:
+    root_dir: Path
+    preproc_dir: Path
+    epochs: int
+    batch_size: int
+    lr: float
+    random_state: int
+    embedding_dim_rule: str  

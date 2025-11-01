@@ -110,7 +110,7 @@ class DataTransformation:
         for col in special_cols:
             if col in clarity_tf.columns:
                 clarity_tf[col] = clarity_df[col].apply(
-                    lambda x: 1 if pd.notnull(x) and x != '' else 0
+                    lambda x: str(x) if pd.notnull(x) and x != '' else '0'
                 )
 
         # bool → int
