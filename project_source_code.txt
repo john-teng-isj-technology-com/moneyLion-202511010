@@ -17,7 +17,7 @@ from src.moneylion.pipeline.data_ingestion_pipeline import DataIngestionPipeline
 from src.moneylion.pipeline.data_transformation_pipeline import DataTransformationPipeline
 from src.moneylion.pipeline.data_preprocessing_pipeline import DataPreprocessingPipeline
 from src.moneylion.pipeline.embedding_pipeline import EmbeddingPipeline
-
+from src.moneylion.pipeline.model_training_pipeline import ModelTrainingPipeline
 
 @dataclass(frozen=True)
 class StageSpec:
@@ -32,7 +32,9 @@ class MainSequence:
         self.stages: list[StageSpec] = [
             # StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
             # StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
-            StageSpec(EmbeddingPipeline, 'initiate_embedding'),
+            # StageSpec(DataPreprocessingPipeline, 'initiate_data_preprocessing'),
+            # StageSpec(EmbeddingPipeline, 'initiate_embedding'),
+            StageSpec(ModelTrainingPipeline, 'initiate_model_training'),
         ]
 
     def _run_stage(self, spec: StageSpec) -> Optional[Any]:
@@ -611,11 +613,204 @@ class EmbeddingExporter:
 
 ===== END FILE: src/moneylion/components/embedding_export.py =====
 
+===== BEGIN FILE: src/moneylion/components/model_trainer.py =====
+
+from __future__ import annotations
+import json
+from pathlib import Path
+from typing import Any, Dict, Tuple
+from itertools import product
+
+import numpy as np
+import xgboost as xgb
+from sklearn.metrics import (
+    roc_auc_score, f1_score, precision_score, recall_score,
+    accuracy_score, matthews_corrcoef, balanced_accuracy_score,
+    confusion_matrix
+)
+import mlflow
+
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import ModelTrainingConfig
+from src.moneylion.utils.common import create_directories
+
+
+class ModelTrainerBase:
+    def __init__(self, cfg: ModelTrainingConfig) -> None:
+        self.cfg = cfg
+        create_directories([self.cfg.root_dir])
+
+    def run(self) -> None:
+        raise NotImplementedError
+
+
+class XGBTrainer(ModelTrainerBase):
+    STAGE_NAME = "Model Training"
+
+    def _load_split(self, split: str) -> tuple[np.ndarray, np.ndarray]:
+        X = np.load(self.cfg.embed_dir / f"X_{split}.npy")
+        y = np.load(self.cfg.embed_dir / f"y_{split}.npy")
+        return X.astype("float32"), y.astype("int64")
+
+    @staticmethod
+    def _choose_threshold_on_val(y_true: np.ndarray, y_prob: np.ndarray) -> Tuple[float, Dict[str, float]]:
+        # Scan thresholds to maximize F1; return best threshold and metrics at that threshold
+        best_t, best_f1 = 0.5, -1.0
+        for t in np.linspace(0.05, 0.95, 91):
+            y_hat = (y_prob >= t).astype(int)
+            f1 = f1_score(y_true, y_hat, zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_t = float(t)
+        y_hat = (y_prob >= best_t).astype(int)
+        metrics = {
+            "val_f1": f1_score(y_true, y_hat, zero_division=0),
+            "val_precision": precision_score(y_true, y_hat, zero_division=0),
+            "val_recall": recall_score(y_true, y_hat, zero_division=0),
+            "val_accuracy": accuracy_score(y_true, y_hat),
+            "val_mcc": matthews_corrcoef(y_true, y_hat) if len(np.unique(y_true)) == 2 else 0.0,
+            "val_balanced_accuracy": balanced_accuracy_score(y_true, y_hat),
+        }
+        return best_t, metrics
+
+    @staticmethod
+    def _compute_test_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float) -> Tuple[Dict[str, float], np.ndarray]:
+        y_hat = (y_prob >= threshold).astype(int)
+        metrics = {
+            "test_auc": roc_auc_score(y_true, y_prob),
+            "test_f1": f1_score(y_true, y_hat, zero_division=0),
+            "test_precision": precision_score(y_true, y_hat, zero_division=0),
+            "test_recall": recall_score(y_true, y_hat, zero_division=0),
+            "test_accuracy": accuracy_score(y_true, y_hat),
+            "test_mcc": matthews_corrcoef(y_true, y_hat) if len(np.unique(y_true)) == 2 else 0.0,
+            "test_balanced_accuracy": balanced_accuracy_score(y_true, y_hat),
+            "decision_threshold": float(threshold),
+        }
+        cm = confusion_matrix(y_true, y_hat)
+        return metrics, cm
+
+    def run(self) -> None:
+        # 0) MLflow experiment (optional)
+        if self.cfg.mlflow_experiment:
+            mlflow.set_experiment(self.cfg.mlflow_experiment)
+
+        # 1) Load datasets
+        X_train, y_train = self._load_split("train")
+        X_val,   y_val   = self._load_split("val")
+        X_test,  y_test  = self._load_split("test")
+
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dval   = xgb.DMatrix(X_val,   label=y_val)
+        dtest  = xgb.DMatrix(X_test,  label=y_test)
+
+        # 2) Grid search on validation AUC
+        best_auc = -1.0
+        best_params: Dict[str, Any] = {}
+        best_booster: xgb.Booster | None = None
+
+        param_grid = self.cfg.param_grid or {}
+        keys, values = zip(*param_grid.items()) if param_grid else ([], [])
+        for combo in product(*values) if values else [()]:
+            params = dict(zip(keys, combo)) if combo else {}
+            params.update(
+                objective="binary:logistic",
+                eval_metric=self.cfg.metric,
+            )
+            # Move n_estimators out of params to avoid XGBoost warning
+            num_boost_round = int(params.pop("n_estimators", 200))
+
+            with mlflow.start_run(nested=True):
+                mlflow.log_params({**params, "num_boost_round": num_boost_round})
+
+                booster = xgb.train(
+                    params,
+                    dtrain,
+                    num_boost_round=num_boost_round,
+                    evals=[(dval, "val")],
+                    early_stopping_rounds=self.cfg.early_stopping_rounds,
+                    verbose_eval=False,
+                )
+
+                val_pred = booster.predict(dval)
+                val_auc = roc_auc_score(y_val, val_pred)
+                mlflow.log_metric("val_auc", val_auc)
+                logger.info("Params %s → val_auc=%.4f", {**params, "num_boost_round": num_boost_round}, val_auc)
+
+                if val_auc > best_auc:
+                    best_auc = val_auc
+                    best_params = {**params, "num_boost_round": num_boost_round}
+                    best_booster = booster
+
+        assert best_booster is not None, "No model was trained."
+
+        # 3) Choose decision threshold
+        val_pred_best = best_booster.predict(dval)
+        if self.cfg.decision_threshold.lower() == "auto":
+            threshold, val_class_metrics = self._choose_threshold_on_val(y_val, val_pred_best)
+        else:
+            try:
+                threshold = float(self.cfg.decision_threshold)
+            except ValueError:
+                threshold = 0.5
+            val_hat = (val_pred_best >= threshold).astype(int)
+            val_class_metrics = {
+                "val_f1": f1_score(y_val, val_hat, zero_division=0),
+                "val_precision": precision_score(y_val, val_hat, zero_division=0),
+                "val_recall": recall_score(y_val, val_hat, zero_division=0),
+                "val_accuracy": accuracy_score(y_val, val_hat),
+                "val_mcc": matthews_corrcoef(y_val, val_hat) if len(np.unique(y_val)) == 2 else 0.0,
+                "val_balanced_accuracy": balanced_accuracy_score(y_val, val_hat),
+            }
+
+        # 4) Final test metrics
+        test_prob = best_booster.predict(dtest)
+        test_metrics, cm = self._compute_test_metrics(y_test, test_prob, threshold)
+
+        # 5) Persist model and reports
+        model_path = self.cfg.root_dir / "xgb_model.json"
+        best_booster.save_model(model_path)
+
+        metrics_all = {
+            "best_params": best_params,
+            "val_auc": best_auc,
+            **val_class_metrics,
+            **test_metrics,
+        }
+        with open(self.cfg.root_dir / "metrics.json", "w") as f:
+            json.dump(metrics_all, f, indent=2)
+
+        # Save confusion matrix in JSON and CSV
+        np.savetxt(self.cfg.root_dir / "confusion_matrix.csv", cm.astype(int), fmt="%d", delimiter=",")
+        with open(self.cfg.root_dir / "confusion_matrix.json", "w") as f:
+            json.dump({"labels": ["neg", "pos"], "matrix": cm.astype(int).tolist()}, f, indent=2)
+
+        logger.info("Best params %s", best_params)
+        logger.info(
+            "Test AUC=%.4f  F1=%.4f  Precision=%.4f  Recall=%.4f  Acc=%.4f  MCC=%.4f  Thr=%.3f",
+            test_metrics["test_auc"], test_metrics["test_f1"], test_metrics["test_precision"],
+            test_metrics["test_recall"], test_metrics["test_accuracy"], test_metrics["test_mcc"],
+            test_metrics["decision_threshold"],
+        )
+        logger.info("Model saved to %s", model_path)
+
+        # 6) MLflow logging for the winning run
+        with mlflow.start_run(nested=True):
+            mlflow.log_params(best_params)
+            for k, v in metrics_all.items():
+                if isinstance(v, (int, float)):
+                    mlflow.log_metric(k, v)
+            mlflow.log_artifact(model_path, artifact_path="model")
+            mlflow.log_artifact(self.cfg.root_dir / "metrics.json", artifact_path="reports")
+            mlflow.log_artifact(self.cfg.root_dir / "confusion_matrix.csv", artifact_path="reports")
+            mlflow.log_artifact(self.cfg.root_dir / "confusion_matrix.json", artifact_path="reports")
+
+===== END FILE: src/moneylion/components/model_trainer.py =====
+
 ===== BEGIN FILE: src/moneylion/config/configuration.py =====
 from src.moneylion.constants import *
 from src.moneylion.utils.common import read_yaml, create_directories
 from src.moneylion.entity.config_entity import (
-    DataIngestionConfig, DataTransformationConfig, DataPreprocessingConfig, DataEmbeddingConfig
+    DataIngestionConfig, DataTransformationConfig, DataPreprocessingConfig, DataEmbeddingConfig, ModelTrainingConfig
 )
 from pathlib import Path
 
@@ -677,6 +872,21 @@ class ConfigurationManager:
             random_state      = int(cfg.random_state),
             embedding_dim_rule= str(cfg.embedding_dim_rule),
         )
+    
+    def get_model_training_config(self) -> ModelTrainingConfig:
+        cfg = self.config.model_training
+        create_directories([cfg.root_dir])
+        return ModelTrainingConfig(
+            root_dir               = Path(cfg.root_dir),
+            embed_dir              = Path(cfg.embed_dir),
+            model_type             = cfg.model_type,
+            param_grid             = cfg.param_grid,
+            early_stopping_rounds  = int(cfg.early_stopping_rounds),
+            metric                 = cfg.metric,
+            decision_threshold     = str(cfg.decision_threshold),
+            mlflow_experiment      = str(cfg.mlflow_experiment),
+        )
+
 
 ===== END FILE: src/moneylion/config/configuration.py =====
 
@@ -731,6 +941,17 @@ class DataEmbeddingConfig:
     lr: float
     random_state: int
     embedding_dim_rule: str  
+
+@dataclass
+class ModelTrainingConfig:
+    root_dir: Path
+    embed_dir: Path
+    model_type: str
+    param_grid: dict
+    early_stopping_rounds: int
+    metric: str
+    decision_threshold: str         
+    mlflow_experiment: str | None = None
 
 ===== END FILE: src/moneylion/entity/config_entity.py =====
 
@@ -841,6 +1062,24 @@ class EmbeddingPipeline:
         return True
 
 ===== END FILE: src/moneylion/pipeline/embedding_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/model_training_pipeline.py =====
+from src.moneylion import logger
+from src.moneylion.components.model_trainer import XGBTrainer
+from src.moneylion.config.configuration import ConfigurationManager
+
+class ModelTrainingPipeline:
+    STAGE_NAME = "Model Training"
+
+    def __init__(self):
+        cfg_mgr = ConfigurationManager()
+        self.cfg = cfg_mgr.get_model_training_config()
+
+    def initiate_model_training(self) -> bool:
+        XGBTrainer(self.cfg).run()
+        return True
+
+===== END FILE: src/moneylion/pipeline/model_training_pipeline.py =====
 
 ===== BEGIN FILE: src/moneylion/utils/common.py =====
 import os
@@ -977,13 +1216,27 @@ data_preprocessing:
 data_embedding:
   root_dir: artifacts/data_embedding
   preproc_dir: artifacts/data_preprocessing
-  # Hyper-parameters (tweak later)
   epochs: 3
   batch_size: 512
   lr: 1e-3
-  random_state: 42
-  # embedding_dim_rule = "sqrt" or fixed integer
+  random_state: 517
   embedding_dim_rule: sqrt
+
+model_training:
+  root_dir: artifacts/model_training
+  embed_dir: artifacts/data_embedding
+  model_type: xgboost
+  param_grid:
+    max_depth:  [3, 5]
+    eta:        [0.3, 0.1]
+    n_estimators: [200]
+    subsample:  [0.8]
+    colsample_bytree: [0.8]
+  early_stopping_rounds: 20
+  metric: auc
+  decision_threshold: auto         
+  mlflow_experiment: loan-default-xgb-v1
+
 
 ===== END FILE: yamls/config.yaml =====
 

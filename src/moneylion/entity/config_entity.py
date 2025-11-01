@@ -49,4 +49,5 @@ class ModelTrainingConfig:
     param_grid: dict
     early_stopping_rounds: int
     metric: str
-
+    decision_threshold: str         
+    mlflow_experiment: str | None = None

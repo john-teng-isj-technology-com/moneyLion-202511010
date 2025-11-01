@@ -74,5 +74,7 @@ class ConfigurationManager:
             param_grid             = cfg.param_grid,
             early_stopping_rounds  = int(cfg.early_stopping_rounds),
             metric                 = cfg.metric,
+            decision_threshold     = str(cfg.decision_threshold),
+            mlflow_experiment      = str(cfg.mlflow_experiment),
         )
 
