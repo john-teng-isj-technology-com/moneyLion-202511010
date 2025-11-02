@@ -1,0 +1,31 @@
+substitutions:
+  _REGION: asia-southeast2
+  _REPO:   moneylion-202511010
+  _IMAGE:  loan-default-api
+
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  entrypoint: bash
+  args:
+    - -c
+    - |
+      docker buildx create --use
+      docker buildx build \
+        --platform linux/amd64 \
+        -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID} \
+        --push .
+
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args:
+    - run
+    - deploy
+    - ${_IMAGE}
+    - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID}
+    - --region=${_REGION}
+    - --platform=managed
+    - --allow-unauthenticated
+    - --memory=512Mi
+
+images:
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID}'

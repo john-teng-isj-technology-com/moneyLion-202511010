@@ -1,0 +1,1470 @@
+
+===== BEGIN FILE: Dockerfile =====
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+EXPOSE 8080
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "serving.app:app"]
+===== END FILE: Dockerfile =====
+
+===== BEGIN FILE: bash/cloudBuild.sh =====
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID="daring-night-475804-a8"
+REGION="asia-southeast2"
+REPO="moneylion-202511010"
+IMAGE="loan-default-api"
+
+TAG=$(git rev-parse --short HEAD 2>/dev/null || date +%s)
+
+gcloud config set project "$PROJECT_ID"
+
+# gcloud artifacts repositories create $REPO \
+    # --repository-format=docker \
+    # --location=$REGION \
+    # --description="Loan-default prediction containers"
+
+
+docker buildx build \
+  --platform linux/amd64 \
+  -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE}:${TAG}" \
+  --push .
+
+# Deploy that specific tag
+gcloud run deploy "$IMAGE" \
+  --image "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE}:${TAG}" \
+  --platform managed \
+  --region "$REGION" \
+  --allow-unauthenticated \
+  --memory 1024Mi
+
+===== END FILE: bash/cloudBuild.sh =====
+
+===== BEGIN FILE: cloudBuild.yaml =====
+substitutions:
+  _REGION: asia-southeast2
+  _REPO:   moneylion-202511010
+  _IMAGE:  loan-default-api
+
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  entrypoint: bash
+  args:
+    - -c
+    - |
+      docker buildx create --use
+      docker buildx build \
+        --platform linux/amd64 \
+        -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID} \
+        --push .
+
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args:
+    - run
+    - deploy
+    - ${_IMAGE}
+    - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID}
+    - --region=${_REGION}
+    - --platform=managed
+    - --allow-unauthenticated
+    - --memory=512Mi
+
+images:
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID}'
+
+===== END FILE: cloudBuild.yaml =====
+
+===== BEGIN FILE: main.py =====
+from dataclasses import dataclass
+from typing import Callable, Type, Any, Optional
+from src.moneylion import logger
+
+# Import your existing pipeline classes
+from src.moneylion.pipeline.data_ingestion_pipeline import DataIngestionPipeline
+from src.moneylion.pipeline.data_transformation_pipeline import DataTransformationPipeline
+from src.moneylion.pipeline.data_preprocessing_pipeline import DataPreprocessingPipeline
+from src.moneylion.pipeline.embedding_pipeline import EmbeddingPipeline
+from src.moneylion.pipeline.model_training_pipeline import ModelTrainingPipeline
+
+@dataclass(frozen=True)
+class StageSpec:
+    pipeline_cls: Type[Any]
+    method_name: str
+    require_true: bool = False  # set True for validation-like stages
+
+
+class MainSequence:
+    def __init__(self):
+        # Define the sequence once; easy to reorder or extend
+        self.stages: list[StageSpec] = [
+            # StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
+            StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
+            # StageSpec(DataPreprocessingPipeline, 'initiate_data_preprocessing'),
+            # StageSpec(EmbeddingPipeline, 'initiate_embedding'),
+            # StageSpec(ModelTrainingPipeline, 'initiate_model_training'),
+        ]
+
+    def _run_stage(self, spec: StageSpec) -> Optional[Any]:
+        obj = spec.pipeline_cls()
+        stage_name = getattr(obj, 'STAGE_NAME', obj.__class__.__name__)
+
+        logger.info(f'>>>> stage {stage_name} started <<<<')
+        result = getattr(obj, spec.method_name)()
+        if spec.require_true and not result:
+            # keep your original behavior for validation failure
+            raise Exception('VALIDATION FAILED')
+        logger.info(f'>>>> stage {stage_name} completed <<<<')
+        return result
+
+    def run(self) -> None:
+        try:
+            for spec in self.stages:
+                self._run_stage(spec)
+        except Exception as e:
+            logger.exception(e)
+            raise
+
+
+if __name__ == '__main__':
+    main_sequence = MainSequence()
+    main_sequence.run()
+
+===== END FILE: main.py =====
+
+===== BEGIN FILE: requirements.txt =====
+
+pandas
+numpy
+scikit-learn
+torch
+
+PyYAML
+python-box
+python-dotenv
+ensure
+tqdm
+
+google-cloud-storage
+
+mlflow
+xgboost
+
+# notebook
+# matplotlib
+# seaborn
+
+Flask
+gunicorn
+jinja2
+
+===== END FILE: requirements.txt =====
+
+===== BEGIN FILE: serving/app.py =====
+from flask import Flask, request, jsonify, render_template
+from pathlib import Path
+import numpy as np, xgboost as xgb, json
+from serving.helpers import make_feature_vector, SCHEMA, ARTIFACT_DIR
+
+app = Flask(__name__, template_folder="templates")
+
+booster = xgb.Booster()
+booster.load_model(ARTIFACT_DIR / "xgb_model.json")
+THR = SCHEMA.get("decision_threshold", 0.5)
+
+@app.route("/health", methods=["GET"])
+def health():
+    return "ok", 200
+
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    payload = request.get_json(force=True)
+    rows    = payload.get("rows", [])
+    mat     = np.vstack([make_feature_vector(r) for r in rows])
+    probs   = booster.predict(xgb.DMatrix(mat)).tolist()
+    preds   = [int(p >= THR) for p in probs]
+    return jsonify({"probs": probs, "preds": preds})
+
+
+@app.route("/", methods=["GET", "POST"])
+def form():
+    if request.method == "POST":
+        raw = request.form.to_dict()
+        vec = make_feature_vector(raw).reshape(1, -1)
+        prob = float(booster.predict(xgb.DMatrix(vec))[0])
+        pred = int(prob >= THR)
+        return render_template("result.html", prob=prob, pred=pred)
+    return render_template("form.html")     
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
+
+===== END FILE: serving/app.py =====
+
+===== BEGIN FILE: serving/helpers.py =====
+import json, numpy as np, pandas as pd
+from pathlib import Path
+import torch
+
+ARTIFACT_DIR = Path("artifacts") / "model_training"
+PREPROCESS_DIR    = Path("artifacts") / "data_preprocessing"
+EMBED_DIR    = Path("artifacts") / "data_embedding"
+
+with open(PREPROCESS_DIR / "vocabs.json") as f:
+    VOCABS = json.load(f)
+with open(EMBED_DIR / "embed_schema.json") as f:
+    SCHEMA = json.load(f)
+with open(ARTIFACT_DIR / "numeric_stats.json") as f:
+    NUM_STATS = json.load(f)
+with open(ARTIFACT_DIR / "dummy_cols.json") as f:
+    DUMMY_COLS = json.load(f)['dummies']
+
+EMBED_TABLES = {
+    name: np.load(EMBED_DIR / "embed_matrices" / f"{name}.npy")
+    for name in VOCABS.keys()
+}
+
+def z_score(col, val):           
+    mu, sd = NUM_STATS[col]["mean"], NUM_STATS[col]["std"]
+    return (val - mu) / (sd or 1.0)
+
+def embed_special(col_name: str, raw_val: str) -> np.ndarray:
+    idx = VOCABS[col_name].get(str(raw_val), 0)
+    return EMBED_TABLES[col_name][idx]        
+
+def make_feature_vector(raw: dict) -> np.ndarray:
+    """
+    input : dict from API caller .
+    returns 1-D float32 vector that matches training order.
+    """
+    num_parts = [
+        z_score("apr", float(raw.get("apr", 0))),
+        z_score("nPaidOff", float(raw.get("nPaidOff", 0))),
+        z_score("loanAmount", float(raw.get("loanAmount", 0))),
+        z_score("originallyScheduledPaymentAmount",
+                float(raw.get("originallyScheduledPaymentAmount", 0))),
+    ]
+
+    dummy_vec = [0.0] * len(DUMMY_COLS)
+    cat_prefix_pairs = {
+        "payFrequency_": raw.get("payFrequency", ""),
+        "state_":        raw.get("state",  ""),
+        "leadType_":     raw.get("leadType",  ""),
+        "fpStatus_":     raw.get("fpStatus",  ""),
+    }
+    for prefix, value in cat_prefix_pairs.items():
+        key = prefix + str(value).strip()
+        if key in DUMMY_COLS:
+            dummy_vec[DUMMY_COLS.index(key)] = 1.0
+
+    emb_vecs = [
+        embed_special(col, raw.get(col, "NA"))
+        for col in VOCABS.keys()
+    ]
+
+    return np.hstack([*emb_vecs, num_parts, dummy_vec]).astype("float32")
+
+===== END FILE: serving/helpers.py =====
+
+===== BEGIN FILE: setup.py =====
+
+===== END FILE: setup.py =====
+
+===== BEGIN FILE: src/moneylion/components/data_ingestion.py =====
+from __future__ import annotations
+import os
+from pathlib import Path
+from google.cloud import storage
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import DataIngestionConfig
+from src.moneylion.utils.common import create_directories
+
+
+class DataIngestion:
+
+    def __init__(self, config: DataIngestionConfig) -> None:
+        self.config = config
+        # Ensure the destination directory exists before any downloads
+        create_directories([self.config.local_download_dir])
+        self.storage_client = storage.Client()
+
+    def download_files(self) -> None:
+        # Get a client handle to the GCS bucket
+        bucket = self.storage_client.bucket(self.config.gcs_bucket_name)
+        logger.info(f"Successfully connected to GCS bucket: '{self.config.gcs_bucket_name}'")
+
+        for filename in self.config.raw_files:
+            local_path = os.path.join(self.config.local_download_dir, filename)
+            blob_path = os.path.join(self.config.gcs_source_folder, filename)
+            blob = bucket.blob(blob_path)
+            blob.download_to_filename(local_path)
+            logger.info(f"Successfully downloaded: '{filename}' from GCS to {local_path}")
+
+===== END FILE: src/moneylion/components/data_ingestion.py =====
+
+===== BEGIN FILE: src/moneylion/components/data_preprocessing.py =====
+# src/moneylion/components/data_preprocessing.py
+
+from __future__ import annotations
+import json
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import DataPreprocessingConfig
+from src.moneylion.utils.common import create_directories
+
+
+_SPECIAL_COLS: List[str] = [
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncodedescription",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncodedescription",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.phonetype",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssndobreasoncode",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncode",
+    ".underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode",
+]
+
+_ID_COLS = ["loanId", "underwritingid", "clarityFraudId"]
+_LABEL_COL = "isBadDebt"
+
+
+class DataPreprocessor:
+    def __init__(self, config: DataPreprocessingConfig) -> None:
+        self.cfg = config
+        create_directories([self.cfg.root_dir])
+
+    # ------------------------------------------------------------------ #
+    # helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _build_vocab(series: pd.Series) -> Dict[str, int]:
+        uniq = sorted(series.unique().tolist())
+        return {token: idx for idx, token in enumerate(uniq)}
+
+    def _split_and_save(
+        self,
+        X_num: np.ndarray,
+        X_cat: np.ndarray,
+        y: np.ndarray,
+    ) -> None:
+        """train / val / test stratified split and npy dump"""
+        train_idx, temp_idx = train_test_split(
+            np.arange(len(y)),
+            test_size=self.cfg.test_size + self.cfg.val_size,
+            stratify=y,
+            random_state=self.cfg.random_state,
+        )
+        rel_test = self.cfg.test_size / (self.cfg.test_size + self.cfg.val_size)
+        val_idx, test_idx = train_test_split(
+            temp_idx,
+            test_size=rel_test,
+            stratify=y[temp_idx],
+            random_state=self.cfg.random_state,
+        )
+
+        splits = {
+            "train": train_idx,
+            "val": val_idx,
+            "test": test_idx,
+        }
+
+        for split_name, idx in splits.items():
+            np.save(self.cfg.root_dir / f"{split_name}_num.npy", X_num[idx].astype("float32"))
+            np.save(self.cfg.root_dir / f"{split_name}_cat.npy", X_cat[idx].astype("int64"))
+            np.save(self.cfg.root_dir / f"{split_name}_y.npy",   y[idx].astype("int64"))
+            logger.info("Saved %s split – %d rows", split_name, len(idx))
+
+    # ------------------------------------------------------------------ #
+    # public entry
+    # ------------------------------------------------------------------ #
+    def run(self) -> None:
+        logger.info("Loading joined_df from %s", self.cfg.joined_csv)
+        df = pd.read_csv(self.cfg.joined_csv, low_memory=False)
+
+        # ------------------------------------------------------------------
+        # 1. Prepare categorical special columns
+        # ------------------------------------------------------------------
+        cat_idx_arrays: List[np.ndarray] = []
+        vocabs_json: Dict[str, Dict[str, int]] = {}
+
+        for col in _SPECIAL_COLS:
+            if col not in df.columns:
+                logger.warning("Special column %s not found – filling 'NA'", col)
+                df[col] = "NA"
+            df[col] = df[col].fillna("NA").astype(str)
+
+            vocab = self._build_vocab(df[col])
+            vocabs_json[col] = vocab
+            cat_idx_arrays.append(df[col].map(vocab).to_numpy(np.int64))
+
+        X_cat = np.stack(cat_idx_arrays, axis=1)  # shape [N, C]
+        logger.info("Built categorical matrix shape %s", X_cat.shape)
+
+        # ------------------------------------------------------------------
+        # 2. Numeric matrix 
+        # ------------------------------------------------------------------
+        numeric_cols = [
+            c
+            for c in df.columns
+            if c not in (_SPECIAL_COLS + _ID_COLS + [_LABEL_COL])
+        ]
+        X_num = df[numeric_cols].to_numpy(np.float32)
+        logger.info("Numeric matrix shape %s", X_num.shape)
+
+        # ------------------------------------------------------------------
+        # 3. Labels
+        # ------------------------------------------------------------------
+        y = df[_LABEL_COL].to_numpy(np.int64)
+
+        # ------------------------------------------------------------------
+        # 4. Split and save
+        # ------------------------------------------------------------------
+        self._split_and_save(X_num, X_cat, y)
+
+        # ------------------------------------------------------------------
+        # 5. Persist metadata
+        # ------------------------------------------------------------------
+        with open(self.cfg.root_dir / "vocabs.json", "w") as f:
+            json.dump(vocabs_json, f, indent=2)
+        with open(self.cfg.root_dir / "columns.json", "w") as f:
+            json.dump(
+                {
+                    "categorical": _SPECIAL_COLS,
+                    "numeric": numeric_cols,
+                    "label": _LABEL_COL,
+                },
+                f,
+                indent=2,
+            )
+
+        logger.info("Data-preprocessing completed. Artifacts written to %s", self.cfg.root_dir)
+
+===== END FILE: src/moneylion/components/data_preprocessing.py =====
+
+===== BEGIN FILE: src/moneylion/components/data_transformation.py =====
+# src/moneylion/components/data_transformation.py
+from __future__ import annotations
+import pandas as pd 
+import numpy as np
+import copy
+from pathlib import Path
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import DataTransformationConfig
+from src.moneylion.utils.common import create_directories, save_json
+
+
+class DataTransformation:
+    def __init__(self, config: DataTransformationConfig) -> None:
+        self.config = config
+        create_directories([self.config.root_dir])
+
+    @staticmethod
+    def _calculate_z_score(series: pd.Series) -> pd.Series:
+        mean    = series.mean()
+        std     = series.std(ddof=0) or 1.0  
+        z_scores = (series - mean) / std
+        return z_scores, {"mean": float(mean), "std": float(std)}
+
+    @staticmethod
+    def _contains_match(col: pd.Series) -> bool:
+        return col.astype(str).str.lower().str.contains("match").any()
+
+    def transform_data(self) -> None:
+
+        loan_df = pd.read_csv(self.config.loan_raw)
+        bad_status  = [
+            'Charged Off', 'Settled Bankruptcy', 'Charged Off Paid Off',
+            'External Collection', 'Internal Collection', 'Rejected'
+        ]
+        good_status = ['Paid Off Loan', 'Settlement Paid Off']
+
+        loan_df['isBadDebt'] = loan_df['loanStatus'].apply(
+            lambda x: True  if x in bad_status  else
+                      False if x in good_status else None
+        )
+
+        loan_df = loan_df[loan_df['loanStatus'].isin(bad_status + good_status)]
+
+        # remove dirty rows 
+        loan_df = loan_df[~((loan_df['isFunded'] == 1) & (loan_df['loanStatus'] == 'Rejected'))]
+        loan_df = loan_df[~((loan_df['isFunded'] == 0) & (loan_df['loanStatus'] != 'Rejected'))]
+
+        wanted_cols = [
+            'loanId', 'payFrequency', 'apr', 'originated', 'nPaidOff',
+            'isBadDebt', 'loanAmount',
+            'originallyScheduledPaymentAmount', 'state', 'leadType',
+            'fpStatus', 'clarityFraudId', 'hasCF'
+        ]
+        loan_df = loan_df[wanted_cols]
+
+        # one-hot encode categorical cols
+        dummies = pd.get_dummies(
+            loan_df[['payFrequency', 'state', 'leadType', 'fpStatus']],
+            prefix=['payFrequency', 'state', 'leadType', 'fpStatus'],
+            dtype=int
+        )
+        dummy_cols_path = self.config.dummy_cols_path
+        save_json(dummy_cols_path, {'dummies': dummies.columns.tolist()})
+
+        loan_df = pd.concat(
+            [loan_df.drop(columns=['payFrequency', 'state', 'leadType', 'fpStatus']),
+             dummies],
+            axis=1
+        )
+
+        # boolean → int
+        loan_df['originated'] = loan_df['originated'].astype(int)
+        loan_df['isBadDebt']  = loan_df['isBadDebt'].astype(int)
+
+        # z-score selected numeric columns
+        num_stats = {}
+        z_cols = ['apr', 'nPaidOff', 'loanAmount', 'originallyScheduledPaymentAmount']
+        for col in z_cols:
+            z_scores, num_stats[col] = self._calculate_z_score(loan_df[col])
+            loan_df[col] = z_scores
+
+        num_stats_path = self.config.num_stats_path
+        save_json(num_stats_path, num_stats)
+
+        clarity_df = pd.read_csv(self.config.clarity_raw, low_memory=False)
+
+        num_cols     = clarity_df.select_dtypes(include=['number']).columns.tolist()
+        bool_cols    = clarity_df.select_dtypes(include=['bool']).columns.tolist()
+        match_cols   = [c for c in clarity_df.columns
+                        if self._contains_match(clarity_df[c])]
+
+        special_cols = [
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncodedescription',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncodedescription',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.phonetype',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.ssndobreasoncode',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncode',
+            '.underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode'
+        ]
+
+        keep_cols = list(
+            set(num_cols + bool_cols + match_cols + special_cols + ['underwritingid'])
+        )
+        clarity_df = clarity_df[keep_cols]
+
+        clarity_tf = copy.deepcopy(clarity_df)
+
+        # “match” cols → 0/1
+        for col in match_cols:
+            clarity_tf[col] = clarity_df[col].apply(
+                lambda x: 1 if "match" in str(x).lower() else 0
+            )
+
+        # special presence cols → 0/1
+        for col in special_cols:
+            if col in clarity_tf.columns:
+                clarity_tf[col] = clarity_df[col].apply(
+                    lambda x: str(x) if pd.notnull(x) and x != '' else '0'
+                )
+
+        # bool → int
+        for col in bool_cols:
+            clarity_tf[col] = clarity_df[col].astype(int)
+
+        # z-score numeric
+        for col in num_cols:
+            clarity_tf[col], _ = self._calculate_z_score(clarity_df[col])
+
+        # Join
+        loan_df['clarityFraudId']   = loan_df['clarityFraudId'].astype(str)
+        clarity_tf['underwritingid'] = clarity_tf['underwritingid'].astype(str)
+
+        joined_df = loan_df.merge(
+            clarity_tf,
+            how='left',
+            left_on='clarityFraudId',
+            right_on='underwritingid'
+        ).fillna(0)
+
+        # Save
+        out_path = Path(self.config.joined_local)
+        joined_df.to_csv(out_path, index=False)
+        logger.info(f"joined_df created with shape {joined_df.shape} → {out_path}")
+
+===== END FILE: src/moneylion/components/data_transformation.py =====
+
+===== BEGIN FILE: src/moneylion/components/embedding_export.py =====
+from __future__ import annotations
+import json
+import math
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.utils import shuffle
+
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import DataEmbeddingConfig
+from src.moneylion.utils.common import create_directories
+
+
+class _EmbedNet(nn.Module):
+    def __init__(
+        self,
+        cardinalities: List[int],
+        numeric_dim: int,
+        dim_rule: str = "sqrt",
+    ) -> None:
+        super().__init__()
+
+        self.emb_layers = nn.ModuleList()
+        emb_dim_total   = 0
+        for card in cardinalities:
+            if dim_rule.isdigit():
+                emb_dim = int(dim_rule)
+            else:                          
+                emb_dim = int(math.sqrt(card))
+            emb_dim_total += emb_dim
+            self.emb_layers.append(nn.Embedding(card, emb_dim))
+
+        self.numeric_bn = nn.BatchNorm1d(numeric_dim) if numeric_dim else nn.Identity()
+
+        self.head = nn.Sequential(
+            nn.Linear(emb_dim_total + numeric_dim, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 1)
+        )
+
+    def forward(self, cat_idx: torch.Tensor, num: torch.Tensor) -> torch.Tensor:
+        emb_vecs = [emb(cat_idx[:, i]) for i, emb in enumerate(self.emb_layers)]
+        concat   = torch.cat(emb_vecs + [num], dim=1)
+        return self.head(concat), torch.cat(emb_vecs, dim=1) 
+    
+
+class EmbeddingExporter:
+    def __init__(self, cfg: DataEmbeddingConfig) -> None:
+        self.cfg = cfg
+        create_directories([self.cfg.root_dir])
+
+        pp_dir = self.cfg.preproc_dir
+        self.X_train_cat = np.load(pp_dir / self.cfg.train_cat)
+        self.X_train_num = np.load(pp_dir / self.cfg.train_num)
+        self.y_train     = np.load(pp_dir / self.cfg.train_y)
+
+        self.X_val_cat   = np.load(pp_dir / self.cfg.val_cat)
+        self.X_val_num   = np.load(pp_dir / self.cfg.val_num)
+        self.y_val       = np.load(pp_dir / self.cfg.val_y)
+
+        # vocabulary sizes
+        with open(pp_dir / self.cfg.vocabs) as f:
+            self.vocabs: Dict[str, Dict[str, int]] = json.load(f)
+        self.cardinalities = [len(stoi) for stoi in self.vocabs.values()]
+        self.numeric_dim   = self.X_train_num.shape[1]
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
+        self.model  = _EmbedNet(
+            self.cardinalities,
+            self.numeric_dim,
+            self.cfg.embedding_dim_rule
+        ).to(self.device)
+
+    def _dl(self, X_cat, X_num, y, shuffle_flag=True) -> DataLoader:
+        Xc = torch.tensor(X_cat, dtype=torch.long)
+        Xn = torch.tensor(X_num, dtype=torch.float32)
+        yt = torch.tensor(y,     dtype=torch.float32).unsqueeze(1)
+        ds = TensorDataset(Xc, Xn, yt)
+        return DataLoader(
+            ds,
+            batch_size=self.cfg.batch_size_train,
+            shuffle=shuffle_flag,
+            num_workers=0,
+            drop_last=False,
+        )
+
+    def train(self) -> None:
+        torch.manual_seed(self.cfg.random_state)
+        opt = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
+        bce = nn.BCEWithLogitsLoss()
+
+        train_loader = self._dl(self.X_train_cat, self.X_train_num, self.y_train)
+        val_loader   = self._dl(self.X_val_cat,   self.X_val_num,   self.y_val, False)
+
+        for epoch in range(self.cfg.epochs):
+            self.model.train()
+            epoch_loss = 0.0
+            for Xc, Xn, y in train_loader:
+                Xc, Xn, y = Xc.to(self.device), Xn.to(self.device), y.to(self.device)
+                opt.zero_grad()
+                logit, _ = self.model(Xc, Xn)
+                loss = bce(logit, y)
+                loss.backward()
+                opt.step()
+                epoch_loss += loss.item() * len(y)
+
+            self.model.eval()
+            with torch.no_grad():
+                val_loss = 0.0
+                for Xc, Xn, y in val_loader:
+                    Xc, Xn, y = Xc.to(self.device), Xn.to(self.device), y.to(self.device)
+                    logit, _  = self.model(Xc, Xn)
+                    val_loss += bce(logit, y).item() * len(y)
+            logger.info(
+                f"Epoch {epoch+1}/{self.cfg.epochs} "
+                f"train_loss={epoch_loss/len(self.y_train):.4f} "
+                f"val_loss={val_loss/len(self.y_val):.4f}"
+            )
+
+    def _export_row_embeddings(self, X_cat: np.ndarray) -> np.ndarray:
+        self.model.eval()
+        loader = DataLoader(
+            torch.tensor(X_cat, dtype=torch.long),
+            batch_size=self.cfg.batch_size_infer,
+            shuffle=False
+        )
+        all_vecs = []
+        with torch.no_grad():
+            for Xc in loader:
+                Xc = Xc.to(self.device)
+                _, emb = self.model(Xc, torch.zeros((len(Xc), self.numeric_dim), device=self.device))
+                all_vecs.append(emb.cpu().numpy())
+        return np.vstack(all_vecs)
+
+    def export(self) -> None:
+        embed_dir = self.cfg.root_dir / self.cfg.embed_matrices
+        create_directories([embed_dir])
+        for name, emb_layer in zip(self.vocabs.keys(), self.model.emb_layers):
+            np.save(embed_dir / f"{name}.npy", emb_layer.weight.detach().cpu().numpy())
+
+        for split in ["train", "val", "test"]:
+            X_cat = np.load(self.cfg.preproc_dir / f"{split}_cat.npy")
+            X_num = np.load(self.cfg.preproc_dir / f"{split}_num.npy")
+            y     = np.load(self.cfg.preproc_dir / f"{split}_y.npy")
+
+            emb_vec = self._export_row_embeddings(X_cat)
+            X_dense = np.hstack([emb_vec, X_num]).astype("float32")
+
+            np.save(self.cfg.root_dir / f"X_{split}.npy", X_dense)
+            np.save(self.cfg.root_dir / f"y_{split}.npy", y.astype("int64"))
+            logger.info("Exported %s dense matrix shape %s", split, X_dense.shape)
+
+        schema = {
+            "embedded_dim_total": int(emb_vec.shape[1]),
+            "numeric_dim": int(self.numeric_dim),
+            "feature_order": [f"emb_{i}" for i in range(emb_vec.shape[1])]
+                            + [f"num_{i}" for i in range(self.numeric_dim)]
+        }
+        with open(self.cfg.root_dir / self.cfg.embed_schema, "w") as f:
+            json.dump(schema, f, indent=2)
+
+        logger.info("Embedding export complete. Artifacts saved under %s", self.cfg.root_dir)
+
+    def run(self):
+        self.train()
+        self.export()
+
+===== END FILE: src/moneylion/components/embedding_export.py =====
+
+===== BEGIN FILE: src/moneylion/components/model_trainer.py =====
+from __future__ import annotations
+import json
+from pathlib import Path
+from typing import Any, Dict, Tuple
+from itertools import product
+
+import numpy as np
+import xgboost as xgb
+from sklearn.metrics import (
+    roc_auc_score, f1_score, precision_score, recall_score,
+    accuracy_score, matthews_corrcoef, balanced_accuracy_score,
+    confusion_matrix
+)
+import mlflow
+
+from src.moneylion import logger
+from src.moneylion.entity.config_entity import ModelTrainingConfig
+from src.moneylion.utils.common import create_directories
+
+
+class ModelTrainerBase:
+    def __init__(self, cfg: ModelTrainingConfig) -> None:
+        self.cfg = cfg
+        create_directories([self.cfg.root_dir])
+
+    def run(self) -> None:
+        raise NotImplementedError
+
+
+class XGBTrainer(ModelTrainerBase):
+    STAGE_NAME = "Model Training (XGBoost)"
+
+    def _load_split(self, split: str) -> tuple[np.ndarray, np.ndarray]:
+        X = np.load(self.cfg.embed_dir / f"X_{split}.npy")
+        y = np.load(self.cfg.embed_dir / f"y_{split}.npy")
+        return X.astype("float32"), y.astype("int64")
+
+    @staticmethod
+    def _choose_threshold_on_val(y_true: np.ndarray, y_prob: np.ndarray) -> Tuple[float, Dict[str, float]]:
+        best_t, best_f1 = 0.5, -1.0
+        for t in np.linspace(0.05, 0.95, 91):
+            y_hat = (y_prob >= t).astype(int)
+            f1 = f1_score(y_true, y_hat, zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_t = float(t)
+        y_hat = (y_prob >= best_t).astype(int)
+        metrics = {
+            "val_f1": f1_score(y_true, y_hat, zero_division=0),
+            "val_precision": precision_score(y_true, y_hat, zero_division=0),
+            "val_recall": recall_score(y_true, y_hat, zero_division=0),
+            "val_accuracy": accuracy_score(y_true, y_hat),
+            "val_mcc": matthews_corrcoef(y_true, y_hat) if len(np.unique(y_true)) == 2 else 0.0,
+            "val_balanced_accuracy": balanced_accuracy_score(y_true, y_hat),
+        }
+        return best_t, metrics
+
+    @staticmethod
+    def _compute_classification_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float, prefix: str = "") -> Dict[str, float]:
+        """Compute all classification metrics at a given threshold"""
+        y_hat = (y_prob >= threshold).astype(int)
+        metrics = {
+            f"{prefix}f1": f1_score(y_true, y_hat, zero_division=0),
+            f"{prefix}precision": precision_score(y_true, y_hat, zero_division=0),
+            f"{prefix}recall": recall_score(y_true, y_hat, zero_division=0),
+            f"{prefix}accuracy": accuracy_score(y_true, y_hat),
+            f"{prefix}mcc": matthews_corrcoef(y_true, y_hat) if len(np.unique(y_true)) == 2 else 0.0,
+            f"{prefix}balanced_accuracy": balanced_accuracy_score(y_true, y_hat),
+        }
+        return metrics
+
+    @staticmethod
+    def _compute_test_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float) -> Tuple[Dict[str, float], np.ndarray]:
+        y_hat = (y_prob >= threshold).astype(int)
+        metrics = {
+            "test_auc": roc_auc_score(y_true, y_prob),
+            "test_f1": f1_score(y_true, y_hat, zero_division=0),
+            "test_precision": precision_score(y_true, y_hat, zero_division=0),
+            "test_recall": recall_score(y_true, y_hat, zero_division=0),
+            "test_accuracy": accuracy_score(y_true, y_hat),
+            "test_mcc": matthews_corrcoef(y_true, y_hat) if len(np.unique(y_true)) == 2 else 0.0,
+            "test_balanced_accuracy": balanced_accuracy_score(y_true, y_hat),
+            "decision_threshold": float(threshold),
+        }
+        cm = confusion_matrix(y_true, y_hat)
+        return metrics, cm
+
+    def run(self) -> None:
+        if self.cfg.mlflow_experiment:
+            mlflow.set_experiment(self.cfg.mlflow_experiment)
+
+        X_train, y_train = self._load_split("train")
+        X_val,   y_val   = self._load_split("val")
+        X_test,  y_test  = self._load_split("test")
+
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dval   = xgb.DMatrix(X_val,   label=y_val)
+        dtest  = xgb.DMatrix(X_test,  label=y_test)
+
+        # Grid search on validation AUC
+        best_auc = -1.0
+        best_params: Dict[str, Any] = {}
+        best_booster: xgb.Booster | None = None
+
+        param_grid = self.cfg.param_grid or {}
+        keys, values = zip(*param_grid.items()) if param_grid else ([], [])
+        for combo in product(*values) if values else [()]:
+            params = dict(zip(keys, combo)) if combo else {}
+            params.update(
+                objective="binary:logistic",
+                eval_metric=self.cfg.metric,
+            )
+            num_boost_round = int(params.pop("n_estimators", 200))
+
+            with mlflow.start_run(nested=True):
+                mlflow.log_params({**params, "num_boost_round": num_boost_round})
+
+                booster = xgb.train(
+                    params,
+                    dtrain,
+                    num_boost_round=num_boost_round,
+                    evals=[(dval, "val")],
+                    early_stopping_rounds=self.cfg.early_stopping_rounds,
+                    verbose_eval=False,
+                )
+
+                val_pred = booster.predict(dval)
+                val_auc = roc_auc_score(y_val, val_pred)
+                
+                val_class_metrics = self._compute_classification_metrics(
+                    y_val, val_pred, threshold=0.5, prefix="val_"
+                )
+                
+                mlflow.log_metric("val_auc", val_auc)
+                
+                for metric_name, metric_value in val_class_metrics.items():
+                    mlflow.log_metric(metric_name, metric_value)
+                
+                logger.info(
+                    "Params %s → val_auc=%.4f, val_f1=%.4f, val_acc=%.4f, val_mcc=%.4f",
+                    {**params, "num_boost_round": num_boost_round},
+                    val_auc,
+                    val_class_metrics["val_f1"],
+                    val_class_metrics["val_accuracy"],
+                    val_class_metrics["val_mcc"]
+                )
+
+                if val_auc > best_auc:
+                    best_auc = val_auc
+                    best_params = {**params, "num_boost_round": num_boost_round}
+                    best_booster = booster
+
+        assert best_booster is not None, "No model was trained."
+
+        val_pred_best = best_booster.predict(dval)
+        if self.cfg.decision_threshold.lower() == "auto":
+            threshold, val_class_metrics = self._choose_threshold_on_val(y_val, val_pred_best)
+        else:
+            try:
+                threshold = float(self.cfg.decision_threshold)
+            except ValueError:
+                threshold = 0.5
+            val_class_metrics = self._compute_classification_metrics(
+                y_val, val_pred_best, threshold, prefix="val_"
+            )
+
+        # Final test metrics
+        test_prob = best_booster.predict(dtest)
+        test_metrics, cm = self._compute_test_metrics(y_test, test_prob, threshold)
+
+        # Persist model and reports
+        model_path = self.cfg.root_dir / "xgb_model.json"
+        best_booster.save_model(model_path)
+
+        metrics_all = {
+            "best_params": best_params,
+            "val_auc": best_auc,
+            **val_class_metrics,
+            **test_metrics,
+        }
+        with open(self.cfg.root_dir / "metrics.json", "w") as f:
+            json.dump(metrics_all, f, indent=2)
+
+        # Save confusion matrix in JSON and CSV
+        np.savetxt(self.cfg.root_dir / "confusion_matrix.csv", cm.astype(int), fmt="%d", delimiter=",")
+        with open(self.cfg.root_dir / "confusion_matrix.json", "w") as f:
+            json.dump({"labels": ["neg", "pos"], "matrix": cm.astype(int).tolist()}, f, indent=2)
+
+        logger.info("Best params %s", best_params)
+        logger.info(
+            "Test AUC=%.4f  F1=%.4f  Precision=%.4f  Recall=%.4f  Acc=%.4f  MCC=%.4f  Thr=%.3f",
+            test_metrics["test_auc"], test_metrics["test_f1"], test_metrics["test_precision"],
+            test_metrics["test_recall"], test_metrics["test_accuracy"], test_metrics["test_mcc"],
+            test_metrics["decision_threshold"],
+        )
+        logger.info("Model saved to %s", model_path)
+
+        # MLflow logging for the winning run
+        with mlflow.start_run(nested=True):
+            mlflow.log_params(best_params)
+            for k, v in metrics_all.items():
+                if isinstance(v, (int, float)):
+                    mlflow.log_metric(k, v)
+            mlflow.log_artifact(model_path, artifact_path="model")
+            mlflow.log_artifact(self.cfg.root_dir / "metrics.json", artifact_path="reports")
+            mlflow.log_artifact(self.cfg.root_dir / "confusion_matrix.csv", artifact_path="reports")
+            mlflow.log_artifact(self.cfg.root_dir / "confusion_matrix.json", artifact_path="reports")
+
+===== END FILE: src/moneylion/components/model_trainer.py =====
+
+===== BEGIN FILE: src/moneylion/config/configuration.py =====
+from src.moneylion.constants import *
+from src.moneylion.utils.common import read_yaml, create_directories
+from src.moneylion.entity.config_entity import (
+    DataIngestionConfig, DataTransformationConfig, DataPreprocessingConfig, DataEmbeddingConfig, ModelTrainingConfig
+)
+from pathlib import Path
+
+class ConfigurationManager:
+    def __init__(self, 
+                 config_filepath=CONFIG_FILE_PATH,
+                 params_filepath=PARAMS_FILE_PATH
+                 ):
+        self.config = read_yaml(config_filepath)
+        self.params = read_yaml(params_filepath)
+
+        create_directories([self.config.artifacts_root])
+
+    def get_data_ingestion_config(self) -> DataIngestionConfig:
+        config=self.config.data_ingestion
+        create_directories([config.root_dir])
+
+        data_ingestion_config = DataIngestionConfig(
+            root_dir            = Path(config.root_dir),
+            gcs_bucket_name     = config.gcs_bucket_name,
+            gcs_source_folder   = config.gcs_source_folder,
+            raw_files           = config.raw_files,
+            local_download_dir  = Path(config.local_download_dir),
+            gcp_credentials_path= Path(config.gcp_credentials_path).resolve(), 
+        )
+        return data_ingestion_config
+    
+    def get_data_transformation_config(self) -> DataTransformationConfig:
+        cfg = self.config.data_transformation
+        create_directories([cfg.root_dir])
+        return DataTransformationConfig(
+            root_dir        = Path(cfg.root_dir),
+            loan_raw        = Path(cfg.loan_raw),
+            clarity_raw     = Path(cfg.clarity_raw),
+            joined_local    = Path(cfg.joined_local),
+            dummy_cols_path = Path(cfg.dummy_cols_path),
+            num_stats_path  = Path(cfg.num_stats_path),
+        )
+
+    def get_data_preprocessing_config(self) -> DataPreprocessingConfig:
+        cfg = self.config.data_preprocessing
+        create_directories([cfg.root_dir])
+        return DataPreprocessingConfig(
+            root_dir=Path(cfg.root_dir),
+            joined_csv=Path(cfg.joined_csv),
+            test_size=float(cfg.test_size),
+            val_size=float(cfg.val_size),
+            random_state=int(cfg.random_state),
+        )
+
+    def get_data_embedding_config(self) -> DataEmbeddingConfig:
+        cfg = self.config.data_embedding
+        params = self.params.data_embedding
+        create_directories([cfg.root_dir])
+        return DataEmbeddingConfig(
+            root_dir            = Path(cfg.root_dir),
+            preproc_dir         = Path(cfg.preproc_dir),
+            train_cat           = str(cfg.train_cat),
+            train_num           = str(cfg.train_num),
+            train_y             = str(cfg.train_y),
+            val_cat             = str(cfg.val_cat),
+            val_num             = str(cfg.val_num),
+            val_y               = str(cfg.val_y),
+            vocabs              = str(cfg.vocabs),
+            embed_matrices      = str(cfg.embed_matrices),
+            embed_schema        = str(cfg.embed_schema),
+            epochs              = int(params.epochs),
+            batch_size_train    = int(params.batch_size_train),
+            batch_size_infer    = int(params.batch_size_infer),
+            lr                  = float(params.lr),
+            random_state        = int(params.random_state),
+            embedding_dim_rule  = str(params.embedding_dim_rule),
+        )
+    
+    def get_model_training_config(self) -> ModelTrainingConfig:
+        cfg = self.config.model_training
+        params = self.params.model_training
+        create_directories([cfg.root_dir])
+        return ModelTrainingConfig(
+            root_dir               = Path(cfg.root_dir),
+            embed_dir              = Path(cfg.embed_dir),
+            model_type             = params.model_type,
+            param_grid             = params.param_grid,
+            early_stopping_rounds  = int(params.early_stopping_rounds),
+            metric                 = params.metric,
+            decision_threshold     = str(params.decision_threshold),
+            mlflow_experiment      = str(cfg.mlflow_experiment),
+        )
+
+
+===== END FILE: src/moneylion/config/configuration.py =====
+
+===== BEGIN FILE: src/moneylion/constants/__init__.py =====
+from pathlib import Path
+
+CONFIG_FILE_PATH=Path('yamls/config.yaml')
+PARAMS_FILE_PATH=Path('yamls/params.yaml')
+
+===== END FILE: src/moneylion/constants/__init__.py =====
+
+===== BEGIN FILE: src/moneylion/entity/config_entity.py =====
+from dataclasses import dataclass
+from pathlib import Path
+
+@dataclass
+class DataIngestionConfig:
+    root_dir: Path
+    gcs_bucket_name: str
+    gcs_source_folder: str
+    raw_files: list[str]
+    local_download_dir: Path
+    gcp_credentials_path: Path
+
+@dataclass
+class DataTransformationConfig:
+    root_dir: Path
+    loan_raw: Path
+    clarity_raw: Path
+    joined_local: Path
+    dummy_cols_path: Path
+    num_stats_path: Path
+
+@dataclass
+class DataLoadingConfig:
+    root_dir: Path
+    local_file: Path
+    gcs_target: str
+
+@dataclass
+class DataPreprocessingConfig:
+    root_dir: Path
+    joined_csv: Path
+    test_size: float
+    val_size: float
+    random_state: int 
+
+@dataclass
+class DataEmbeddingConfig:
+    root_dir: Path
+    preproc_dir: Path
+    train_cat: str
+    train_num: str
+    train_y: str
+    val_cat: str
+    val_num: str
+    val_y: str
+    vocabs: str
+    embed_matrices: str
+    embed_schema: str
+    epochs: int
+    batch_size_train: int
+    batch_size_infer: int
+    lr: float
+    random_state: int
+    embedding_dim_rule: str  
+
+@dataclass
+class ModelTrainingConfig:
+    root_dir: Path
+    embed_dir: Path
+    model_type: str
+    param_grid: dict
+    early_stopping_rounds: int
+    metric: str
+    decision_threshold: str         
+    mlflow_experiment: str | None = None
+
+===== END FILE: src/moneylion/entity/config_entity.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/data_ingestion_pipeline.py =====
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+from src.moneylion import logger
+from src.moneylion.components.data_ingestion import DataIngestion
+from src.moneylion.config.configuration import ConfigurationManager
+
+
+class DataIngestionPipeline:
+
+    def __init__(self) -> None:
+        self.config_manager = ConfigurationManager()
+        self.STAGE_NAME = "Data Ingestion"
+
+    def initiate_data_ingestion(self) -> bool:
+
+        # Get the configuration for the data ingestion stage
+        ingestion_config = self.config_manager.get_data_ingestion_config()
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(ingestion_config.gcp_credentials_path)
+
+        # Instantiate and run the component
+        ingestion_component = DataIngestion(config=ingestion_config)
+        ingestion_component.download_files()
+
+        return True
+
+if __name__ == '__main__':
+    try :
+        obj = DataIngestionPipeline()
+        logger.info(f">>>> Stage '{obj.STAGE_NAME}' started <<<<")
+        obj.initiate_data_ingestion()
+        logger.info(f">>>> Stage '{obj.STAGE_NAME}' completed successfully <<<<\n")
+    except Exception as e:
+        logger.exception(e)
+===== END FILE: src/moneylion/pipeline/data_ingestion_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/data_preprocessing_pipeline.py =====
+# pipeline/data_preprocessing_pipeline.py
+from src.moneylion import logger
+from src.moneylion.components.data_preprocessing import DataPreprocessor
+from src.moneylion.config.configuration import ConfigurationManager
+
+class DataPreprocessingPipeline:
+    STAGE_NAME = "Data Preprocessing"
+
+    def __init__(self) -> None:
+        cfg_mgr = ConfigurationManager()
+        self.cfg  = cfg_mgr.get_data_preprocessing_config()
+
+    def initiate_data_preprocessing(self) -> bool:
+        DataPreprocessor(self.cfg).run()
+        return True
+
+===== END FILE: src/moneylion/pipeline/data_preprocessing_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/data_transformation_pipeline.py =====
+import os
+from pathlib import Path
+from src.moneylion import logger
+from src.moneylion.components.data_transformation import DataTransformation
+from src.moneylion.config.configuration import ConfigurationManager
+
+
+class DataTransformationPipeline:
+
+    def __init__(self) -> None:
+        self.config_manager = ConfigurationManager()
+        self.STAGE_NAME = "Data Transformation"
+
+    def initiate_data_transformation(self) -> bool:
+
+        # Get the configuration for the data ingestion stage
+        config = self.config_manager.get_data_transformation_config()
+
+        # Instantiate and run the component
+        transformation_component = DataTransformation(config=config)
+        transformation_component.transform_data()
+
+        return True
+
+if __name__ == '__main__':
+    try :
+        obj = DataTransformationPipeline()
+        logger.info(f">>>> Stage '{obj.STAGE_NAME}' started <<<<")
+        obj.initiate_data_ingestion()
+        logger.info(f">>>> Stage '{obj.STAGE_NAME}' completed successfully <<<<\n")
+    except Exception as e:
+        logger.exception(e)
+===== END FILE: src/moneylion/pipeline/data_transformation_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/embedding_pipeline.py =====
+from src.moneylion import logger
+from src.moneylion.components.embedding_export import EmbeddingExporter
+from src.moneylion.config.configuration import ConfigurationManager
+
+class EmbeddingPipeline:
+    STAGE_NAME = "Data Embedding & Export"
+
+    def __init__(self):
+        self.cfg = ConfigurationManager().get_data_embedding_config()
+
+    def initiate_embedding(self) -> bool:
+        EmbeddingExporter(self.cfg).run()
+        return True
+
+===== END FILE: src/moneylion/pipeline/embedding_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/pipeline/model_training_pipeline.py =====
+from src.moneylion import logger
+from src.moneylion.components.model_trainer import XGBTrainer
+from src.moneylion.config.configuration import ConfigurationManager
+
+class ModelTrainingPipeline:
+    STAGE_NAME = "Model Training"
+
+    def __init__(self):
+        cfg_mgr = ConfigurationManager()
+        self.cfg = cfg_mgr.get_model_training_config()
+
+    def initiate_model_training(self) -> bool:
+        XGBTrainer(self.cfg).run()
+        return True
+
+===== END FILE: src/moneylion/pipeline/model_training_pipeline.py =====
+
+===== BEGIN FILE: src/moneylion/utils/common.py =====
+import os
+import yaml
+from src.moneylion import logger
+import json
+import joblib
+from ensure import ensure_annotations
+from box import ConfigBox
+from pathlib import Path
+from typing import Any 
+from box.exceptions import BoxValueError
+from typing import Any
+
+
+@ensure_annotations
+def read_yaml( path_to_yaml: Path) -> ConfigBox:
+    """reads yaml file and returns
+    
+    Args:
+        path_to_yaml (str) : path like input 
+
+    Raises:
+        ValueError: if yaml file is empty
+        e: empth file
+
+    Returns:
+        ConfigBox: ConfigBox type
+    """
+    try:
+        with open( path_to_yaml) as yaml_file:
+            content = yaml.safe_load(yaml_file)
+            logger.info(f'yaml file: {path_to_yaml} loaded successfully')
+            return ConfigBox(content)
+    except BoxValueError:
+        raise ValueError('yaml file is empty')
+    except Exception as e:
+        raise e
+    
+
+@ensure_annotations
+def create_directories( path_to_directories: list, verbose=True):
+    """create list of directories
+
+    Args:
+        path_to_directories (list)
+        ignore_log (bool, optional)
+
+    """
+    for path in path_to_directories:
+        os.makedirs(path, exist_ok=True)
+        if verbose: 
+            logger.info(f'created directory at: {path}')   
+
+
+@ensure_annotations
+def save_json(path: Path, data: dict):
+    """save json data
+    Args:
+        path (Path)
+        data (dict)
+    """
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=4)
+
+    logger.info(f'json file saved at: {path}')
+
+
+@ensure_annotations
+def load_json(path: Path) -> ConfigBox:
+    """loads json files data
+    Args:
+        path (Path)
+    Returns:
+        data as class attributes instead of dict (ConfigBox)
+    """
+    with open(path) as f:
+        content=json.load(f)
+
+    logger.info(f'json file loaded successfully from: {path}')
+    return ConfigBox(content)
+
+
+@ensure_annotations
+def save_bin(data: Any, path: Path):
+    """save binary file
+    Args:
+        data (Any)
+        path (Path)
+    """
+    joblib.dump(value=data, filename=path)
+    logger.info(f'binary file saved at {path}')
+
+
+@ensure_annotations
+def load_bin(path: Path) -> Any:
+    """load binary data
+    """
+    data = joblib.load(path)
+    logger.info(f'binary file loaded from: {path}')
+    return data
+===== END FILE: src/moneylion/utils/common.py =====
+
+===== BEGIN FILE: yamls/config.yaml =====
+artifacts_root: artifacts
+
+data_ingestion:
+  root_dir: artifacts/data_ingestion
+  gcs_bucket_name: moneylion-202511010
+  gcs_source_folder: raw 
+  raw_files:
+    - clarity_underwriting_variables.csv
+    - loan.csv
+    - payment.csv
+  local_download_dir: artifacts/data_ingestion/raw
+  gcp_credentials_path: .credentials/gcp/daring-night-475804-a8-ab772b8e37f7.json
+
+data_transformation:
+  root_dir: artifacts/data_transformation
+  loan_raw: artifacts/data_ingestion/raw/loan.csv
+  clarity_raw: artifacts/data_ingestion/raw/clarity_underwriting_variables.csv
+  joined_local: artifacts/data_transformation/joined_df.csv
+  dummy_cols_path: artifacts/model_training/dummy_cols.json
+  num_stats_path: artifacts/model_training/numeric_stats.json
+
+data_loading:
+  root_dir: artifacts/data_loading
+  local_file: artifacts/data_transformation/joined_df.csv
+  gcs_target: gs://moneylion-202511010/joined_df.csv
+
+data_preprocessing:
+  root_dir: artifacts/data_preprocessing
+  joined_csv: artifacts/data_transformation/joined_df.csv
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 517
+
+data_embedding:
+  root_dir: artifacts/data_embedding
+  preproc_dir: artifacts/data_preprocessing
+  train_cat: train_cat.npy
+  train_num: train_num.npy
+  train_y: train_y.npy
+  val_cat: val_cat.npy
+  val_num: val_num.npy
+  val_y: val_y.npy
+  vocabs: vocabs.json
+  embed_matrices: embed_matrices
+  embed_schema: embed_schema.json
+
+model_training:
+  root_dir: artifacts/model_training
+  embed_dir: artifacts/data_embedding
+  mlflow_experiment: loan-default-xgb-v1
+
+
+===== END FILE: yamls/config.yaml =====
+
+===== BEGIN FILE: yamls/params.yaml =====
+data_embedding:
+  epochs: 3
+  batch_size_train: 4096
+  batch_size_infer: 512
+  lr: 1e-3
+  random_state: 517
+  embedding_dim_rule: sqrt
+
+model_training:
+  model_type: xgboost      
+  param_grid:
+    max_depth:  [3, 5]
+    eta:        [0.3, 0.1]
+    n_estimators: [200]
+    subsample:  [0.8]
+    colsample_bytree: [0.8]
+  early_stopping_rounds: 20
+  metric: auc
+  decision_threshold: auto    
+===== END FILE: yamls/params.yaml =====

@@ -32,7 +32,7 @@ def form():
         prob = float(booster.predict(xgb.DMatrix(vec))[0])
         pred = int(prob >= THR)
         return render_template("result.html", prob=prob, pred=pred)
-    return render_template("form.html")     # GET
+    return render_template("form.html")     
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
