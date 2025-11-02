@@ -1,5 +1,10 @@
 artifacts_root: artifacts
 
+gcs_artifact_storage:
+  bucket_name: moneylion-202511010
+  base_prefix: artifacts
+  gcp_credentials_path: .credentials/gcp/daring-night-475804-a8-ab772b8e37f7.json
+
 data_ingestion:
   root_dir: artifacts/data_ingestion
   gcs_bucket_name: moneylion-202511010
@@ -19,17 +24,9 @@ data_transformation:
   dummy_cols_path: artifacts/model_training/dummy_cols.json
   num_stats_path: artifacts/model_training/numeric_stats.json
 
-data_loading:
-  root_dir: artifacts/data_loading
-  local_file: artifacts/data_transformation/joined_df.csv
-  gcs_target: gs://moneylion-202511010/joined_df.csv
-
 data_preprocessing:
   root_dir: artifacts/data_preprocessing
   joined_csv: artifacts/data_transformation/joined_df.csv
-  test_size: 0.15
-  val_size: 0.15
-  random_state: 517
 
 data_embedding:
   root_dir: artifacts/data_embedding

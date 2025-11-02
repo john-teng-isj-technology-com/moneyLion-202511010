@@ -1,3 +1,8 @@
+data_preprocessing:
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 517
+
 data_embedding:
   epochs: 3
   batch_size_train: 4096
@@ -17,3 +22,4 @@ model_training:
   early_stopping_rounds: 20
   metric: auc
   decision_threshold: auto    
+

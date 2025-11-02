@@ -2,6 +2,7 @@ from src.moneylion.constants import *
 from src.moneylion.utils.common import read_yaml, create_directories
 from src.moneylion.entity.config_entity import (
     DataIngestionConfig, DataTransformationConfig, DataPreprocessingConfig, DataEmbeddingConfig, ModelTrainingConfig
+    , GCSArtifactConfig
 )
 from pathlib import Path
 
@@ -14,6 +15,14 @@ class ConfigurationManager:
         self.params = read_yaml(params_filepath)
 
         create_directories([self.config.artifacts_root])
+
+    def get_gcs_artifact_config(self) -> GCSArtifactConfig:
+        config = self.config.gcs_artifact_storage
+        return GCSArtifactConfig(
+            bucket_name             = str(config.bucket_name),
+            base_prefix             = str(config.base_prefix),
+            gcp_credentials_path    = Path(config.gcp_credentials_path)
+        )
 
     def get_data_ingestion_config(self) -> DataIngestionConfig:
         config=self.config.data_ingestion
@@ -43,13 +52,14 @@ class ConfigurationManager:
 
     def get_data_preprocessing_config(self) -> DataPreprocessingConfig:
         cfg = self.config.data_preprocessing
+        params = self.params.data_preprocessing
         create_directories([cfg.root_dir])
         return DataPreprocessingConfig(
             root_dir=Path(cfg.root_dir),
             joined_csv=Path(cfg.joined_csv),
-            test_size=float(cfg.test_size),
-            val_size=float(cfg.val_size),
-            random_state=int(cfg.random_state),
+            test_size=float(params.test_size),
+            val_size=float(params.val_size),
+            random_state=int(params.random_state),
         )
 
     def get_data_embedding_config(self) -> DataEmbeddingConfig:

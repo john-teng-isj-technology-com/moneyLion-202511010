@@ -2,6 +2,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 @dataclass
+class GCSArtifactConfig:
+    bucket_name: str
+    base_prefix: str
+    gcp_credentials_path: Path
+
+@dataclass
 class DataIngestionConfig:
     root_dir: Path
     gcs_bucket_name: str

@@ -33,9 +33,6 @@ class DataPreprocessor:
         self.cfg = config
         create_directories([self.cfg.root_dir])
 
-    # ------------------------------------------------------------------ #
-    # helpers
-    # ------------------------------------------------------------------ #
     @staticmethod
     def _build_vocab(series: pd.Series) -> Dict[str, int]:
         uniq = sorted(series.unique().tolist())
@@ -47,7 +44,6 @@ class DataPreprocessor:
         X_cat: np.ndarray,
         y: np.ndarray,
     ) -> None:
-        """train / val / test stratified split and npy dump"""
         train_idx, temp_idx = train_test_split(
             np.arange(len(y)),
             test_size=self.cfg.test_size + self.cfg.val_size,
@@ -74,16 +70,10 @@ class DataPreprocessor:
             np.save(self.cfg.root_dir / f"{split_name}_y.npy",   y[idx].astype("int64"))
             logger.info("Saved %s split – %d rows", split_name, len(idx))
 
-    # ------------------------------------------------------------------ #
-    # public entry
-    # ------------------------------------------------------------------ #
     def run(self) -> None:
         logger.info("Loading joined_df from %s", self.cfg.joined_csv)
         df = pd.read_csv(self.cfg.joined_csv, low_memory=False)
 
-        # ------------------------------------------------------------------
-        # 1. Prepare categorical special columns
-        # ------------------------------------------------------------------
         cat_idx_arrays: List[np.ndarray] = []
         vocabs_json: Dict[str, Dict[str, int]] = {}
 
@@ -100,9 +90,6 @@ class DataPreprocessor:
         X_cat = np.stack(cat_idx_arrays, axis=1)  # shape [N, C]
         logger.info("Built categorical matrix shape %s", X_cat.shape)
 
-        # ------------------------------------------------------------------
-        # 2. Numeric matrix 
-        # ------------------------------------------------------------------
         numeric_cols = [
             c
             for c in df.columns
@@ -111,19 +98,10 @@ class DataPreprocessor:
         X_num = df[numeric_cols].to_numpy(np.float32)
         logger.info("Numeric matrix shape %s", X_num.shape)
 
-        # ------------------------------------------------------------------
-        # 3. Labels
-        # ------------------------------------------------------------------
         y = df[_LABEL_COL].to_numpy(np.int64)
 
-        # ------------------------------------------------------------------
-        # 4. Split and save
-        # ------------------------------------------------------------------
         self._split_and_save(X_num, X_cat, y)
 
-        # ------------------------------------------------------------------
-        # 5. Persist metadata
-        # ------------------------------------------------------------------
         with open(self.cfg.root_dir / "vocabs.json", "w") as f:
             json.dump(vocabs_json, f, indent=2)
         with open(self.cfg.root_dir / "columns.json", "w") as f:
