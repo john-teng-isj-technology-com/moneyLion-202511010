@@ -12,7 +12,7 @@ steps:
       docker buildx create --use
       docker buildx build \
         --platform linux/amd64 \
-        -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID} \
+        -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${COMMIT_SHA} \
         --push .
 
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -21,14 +21,14 @@ steps:
     - run
     - deploy
     - ${_IMAGE}
-    - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID}
+    - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${COMMIT_SHA}
     - --region=${_REGION}
     - --platform=managed
     - --allow-unauthenticated
     - --memory=1024Mi
 
 images:
-- '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID}'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${COMMIT_SHA}'
 
 
 options:
