@@ -13,7 +13,8 @@ steps:
       docker buildx build \
         --platform linux/amd64 \
         -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${COMMIT_SHA} \
-        --push .
+        -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest \
+        --push --load .
 
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
