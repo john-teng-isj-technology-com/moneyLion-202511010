@@ -1,6 +1,7 @@
 # environment
 venv/
-artifacts/
+artifacts/data_ingestion/
+artifacts/data_transformation/
 .credentials/
 .env
 .github/

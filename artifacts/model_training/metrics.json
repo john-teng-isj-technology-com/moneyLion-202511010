@@ -1,0 +1,26 @@
+{
+  "best_params": {
+    "max_depth": 5,
+    "eta": 0.1,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "objective": "binary:logistic",
+    "eval_metric": "auc",
+    "num_boost_round": 200
+  },
+  "val_auc": 0.9636990985979144,
+  "val_f1": 0.958852227500321,
+  "val_precision": 0.9460983025082341,
+  "val_recall": 0.971954711087975,
+  "val_accuracy": 0.9254130788922504,
+  "val_mcc": 0.567372150799515,
+  "val_balanced_accuracy": 0.7521861467527787,
+  "test_auc": 0.9631590035964817,
+  "test_f1": 0.9588399473869943,
+  "test_precision": 0.945643232297665,
+  "test_recall": 0.9724102030192608,
+  "test_accuracy": 0.9253592413752981,
+  "test_mcc": 0.5659556072820353,
+  "test_balanced_accuracy": 0.750345683607379,
+  "decision_threshold": 0.4499999999999999
+}

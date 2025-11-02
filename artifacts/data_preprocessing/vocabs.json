@@ -1,0 +1,35 @@
+{
+  ".underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncode": {
+    "0": 0,
+    "A8": 1
+  },
+  ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncodedescription": {
+    "(S03) SSN match to address only": 0,
+    "(S07) SSN Match to last name only": 1,
+    "0": 2
+  },
+  ".underwritingdataclarity.clearfraud.clearfraudidentityverification.nameaddressreasoncodedescription": {
+    "(A8) Match to Last Name only": 0,
+    "0": 1
+  },
+  ".underwritingdataclarity.clearfraud.clearfraudidentityverification.phonetype": {
+    "0": 0,
+    "B": 1,
+    "MU": 2,
+    "R": 3
+  },
+  ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssndobreasoncode": {
+    "0": 0,
+    "D01": 1,
+    "D02": 2,
+    "D03": 3,
+    "D04": 4,
+    "D06": 5,
+    "D07": 6
+  },
+  ".underwritingdataclarity.clearfraud.clearfraudidentityverification.ssnnamereasoncode": {
+    "0": 0,
+    "S03": 1,
+    "S07": 2
+  }
+}
