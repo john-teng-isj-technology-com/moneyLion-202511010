@@ -24,6 +24,8 @@ list_of_files=[
     'setup.py',
     'research/research.ipynb',
     'templates/index.html',
+    'serving/helpers.py',
+    'serving/__init__.py',
     'app.py'
 ]
 

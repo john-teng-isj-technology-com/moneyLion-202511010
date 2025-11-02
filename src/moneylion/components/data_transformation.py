@@ -4,10 +4,9 @@ import pandas as pd
 import numpy as np
 import copy
 from pathlib import Path
-
 from src.moneylion import logger
 from src.moneylion.entity.config_entity import DataTransformationConfig
-from src.moneylion.utils.common import create_directories
+from src.moneylion.utils.common import create_directories, save_json
 
 
 class DataTransformation:
@@ -17,9 +16,10 @@ class DataTransformation:
 
     @staticmethod
     def _calculate_z_score(series: pd.Series) -> pd.Series:
-        mean = series.mean()
-        std  = series.std(ddof=0) or 1.0  # avoid division by zero
-        return (series - mean) / std
+        mean    = series.mean()
+        std     = series.std(ddof=0) or 1.0  
+        z_scores = (series - mean) / std
+        return z_scores, {"mean": float(mean), "std": float(std)}
 
     @staticmethod
     def _contains_match(col: pd.Series) -> bool:
@@ -39,7 +39,6 @@ class DataTransformation:
                       False if x in good_status else None
         )
 
-        # keep only rows we can label
         loan_df = loan_df[loan_df['loanStatus'].isin(bad_status + good_status)]
 
         # remove dirty rows 
@@ -60,6 +59,9 @@ class DataTransformation:
             prefix=['payFrequency', 'state', 'leadType', 'fpStatus'],
             dtype=int
         )
+        dummy_cols_path = self.config.dummy_cols_path
+        save_json(dummy_cols_path, {'dummies': dummies.columns.tolist()})
+
         loan_df = pd.concat(
             [loan_df.drop(columns=['payFrequency', 'state', 'leadType', 'fpStatus']),
              dummies],
@@ -71,10 +73,15 @@ class DataTransformation:
         loan_df['isBadDebt']  = loan_df['isBadDebt'].astype(int)
 
         # z-score selected numeric columns
-        for col in ['apr', 'nPaidOff', 'loanAmount', 'originallyScheduledPaymentAmount']:
-            loan_df[col] = self._calculate_z_score(loan_df[col])
+        num_stats = {}
+        z_cols = ['apr', 'nPaidOff', 'loanAmount', 'originallyScheduledPaymentAmount']
+        for col in z_cols:
+            z_scores, num_stats[col] = self._calculate_z_score(loan_df[col])
+            loan_df[col] = z_scores
 
-        # 2 ─────────────────────────────── Clarity data
+        num_stats_path = self.config.num_stats_path
+        save_json(num_stats_path, num_stats)
+
         clarity_df = pd.read_csv(self.config.clarity_raw, low_memory=False)
 
         num_cols     = clarity_df.select_dtypes(include=['number']).columns.tolist()
@@ -97,7 +104,6 @@ class DataTransformation:
         )
         clarity_df = clarity_df[keep_cols]
 
-        # deep copy for transformations
         clarity_tf = copy.deepcopy(clarity_df)
 
         # “match” cols → 0/1
@@ -119,7 +125,7 @@ class DataTransformation:
 
         # z-score numeric
         for col in num_cols:
-            clarity_tf[col] = self._calculate_z_score(clarity_df[col])
+            clarity_tf[col], _ = self._calculate_z_score(clarity_df[col])
 
         # Join
         loan_df['clarityFraudId']   = loan_df['clarityFraudId'].astype(str)

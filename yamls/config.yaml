@@ -16,6 +16,8 @@ data_transformation:
   loan_raw: artifacts/data_ingestion/raw/loan.csv
   clarity_raw: artifacts/data_ingestion/raw/clarity_underwriting_variables.csv
   joined_local: artifacts/data_transformation/joined_df.csv
+  dummy_cols_path: artifacts/model_training/dummy_cols.json
+  num_stats_path: artifacts/model_training/numeric_stats.json
 
 data_loading:
   root_dir: artifacts/data_loading

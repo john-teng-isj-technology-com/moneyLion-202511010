@@ -16,6 +16,8 @@ class DataTransformationConfig:
     loan_raw: Path
     clarity_raw: Path
     joined_local: Path
+    dummy_cols_path: Path
+    num_stats_path: Path
 
 @dataclass
 class DataLoadingConfig:
