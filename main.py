@@ -20,11 +20,11 @@ class MainSequence:
     def __init__(self):
         # Define the sequence once; easy to reorder or extend
         self.stages: list[StageSpec] = [
-            # StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
+            StageSpec(DataIngestionPipeline, 'initiate_data_ingestion'),
             StageSpec(DataTransformationPipeline, 'initiate_data_transformation'),
-            # StageSpec(DataPreprocessingPipeline, 'initiate_data_preprocessing'),
-            # StageSpec(EmbeddingPipeline, 'initiate_embedding'),
-            # StageSpec(ModelTrainingPipeline, 'initiate_model_training'),
+            StageSpec(DataPreprocessingPipeline, 'initiate_data_preprocessing'),
+            StageSpec(EmbeddingPipeline, 'initiate_embedding'),
+            StageSpec(ModelTrainingPipeline, 'initiate_model_training'),
         ]
 
     def _run_stage(self, spec: StageSpec) -> Optional[Any]:
