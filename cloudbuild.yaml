@@ -25,7 +25,11 @@ steps:
     - --region=${_REGION}
     - --platform=managed
     - --allow-unauthenticated
-    - --memory=512Mi
+    - --memory=1024Mi
 
 images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${BUILD_ID}'
+
+
+options:
+  logging: CLOUD_LOGGING_ONLY
