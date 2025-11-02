@@ -2,9 +2,11 @@ import json, numpy as np, pandas as pd
 from pathlib import Path
 import torch
 
-ARTIFACT_DIR = Path("artifacts") / "model_training"
-PREPROCESS_DIR    = Path("artifacts") / "data_preprocessing"
-EMBED_DIR    = Path("artifacts") / "data_embedding"
+REPO_ROOT           = Path(__file__).resolve().parents
+ARTIFACTS_ROOT      = REPO_ROOT / "artifacts"
+ARTIFACT_DIR        = ARTIFACTS_ROOT / "model_training"
+PREPROCESS_DIR      = ARTIFACTS_ROOT / "data_preprocessing"
+EMBED_DIR           = ARTIFACTS_ROOT / "data_embedding"
 
 with open(PREPROCESS_DIR / "vocabs.json") as f:
     VOCABS = json.load(f)
