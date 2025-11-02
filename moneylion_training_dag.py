@@ -3,7 +3,10 @@ from __future__ import annotations
 import pendulum
 
 from airflow.models.dag import DAG
-from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import KubernetesPodOperator
+try: 
+    from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import KubernetesPodOperator 
+except ModuleNotFoundError: 
+    from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 
 GCP_PROJECT_ID = "daring-night-475804-a8"
 GCP_REGION = "asia-southeast2"
