@@ -15,9 +15,11 @@ google-cloud-storage
 mlflow
 xgboost
 
-# notebook
-# matplotlib
-# seaborn
+notebook
+matplotlib
+seaborn
+ipykernel
+graphviz
 
 Flask
 gunicorn
