@@ -7,7 +7,9 @@ from src.moneylion.entity.config_entity import GCSArtifactConfig
 class GSCUploader():
     def __init__(self, config: GCSArtifactConfig):
         self.config = config
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(config.gcp_credentials_path)
+        cred_path = config.gcp_credentials_path
+        if cred_path and Path(cred_path).exists():
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(cred_path)
         self.storage_client = storage.Client()
             
     def upload_directory_to_gcs(self, local_directory: Path):

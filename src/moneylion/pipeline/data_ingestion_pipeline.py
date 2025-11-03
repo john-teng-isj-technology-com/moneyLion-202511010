@@ -16,7 +16,12 @@ class DataIngestionPipeline:
 
         # Get the configuration for the data ingestion stage
         ingestion_config = self.config_manager.get_data_ingestion_config()
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(ingestion_config.gcp_credentials_path)
+        cred_path = ingestion_config.gcp_credentials_path
+        if cred_path and Path(cred_path).exists():
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(cred_path)
+            logger.info(f"Using credentials from file: {cred_path}")
+        else:
+            logger.info("Credential file not found. Using Application Default Credentials (ADC).")
 
         # Instantiate and run the component
         ingestion_component = DataIngestion(config=ingestion_config)
