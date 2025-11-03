@@ -8,6 +8,7 @@ artifacts/analysis/
 .github/
 mlruns/
 tmp/
+.github/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
